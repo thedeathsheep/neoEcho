@@ -1,0 +1,101 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-serif: 'Noto Serif SC', 'Georgia', serif;
+  --font-sans: 'Inter', system-ui, sans-serif;
+
+  /* Light (default) */
+  --color-paper: #fdfcfb;
+  --color-paper-warm: #f5f2ef;
+  --color-ink: #2c2c2c;
+  --color-ink-light: #6b6b6b;
+  --color-ink-faint: #b0b0b0;
+  --color-border: #f0ebe6;
+  --color-accent: #c9a96e;
+  --color-surface: #ffffff;
+  --color-btn-primary-bg: #2c2c2c;
+  --color-btn-primary-text: #ffffff;
+  --font-size-base: 16px;
+}
+
+/* Light theme explicit (optional, for symmetry) */
+[data-theme="light"] {
+  --color-paper: #fdfcfb;
+  --color-paper-warm: #f5f2ef;
+  --color-ink: #2c2c2c;
+  --color-ink-light: #6b6b6b;
+  --color-ink-faint: #b0b0b0;
+  --color-border: #f0ebe6;
+  --color-accent: #c9a96e;
+  --color-surface: #ffffff;
+  --color-btn-primary-bg: #2c2c2c;
+  --color-btn-primary-text: #ffffff;
+}
+
+/* Dark theme: scientific contrast, non-pure-black background */
+[data-theme="dark"] {
+  --color-paper: #161618;
+  --color-paper-warm: #1c1c1e;
+  --color-ink: #e5e5e7;
+  --color-ink-light: #98989d;
+  --color-ink-faint: #636366;
+  --color-border: #2c2c2e;
+  --color-accent: #d4a853;
+  --color-surface: #2c2c2e;
+  --color-btn-primary-bg: #d4a853;
+  --color-btn-primary-text: #161618;
+}
+
+/* Font size */
+[data-font-size="small"] {
+  --font-size-base: 14px;
+}
+[data-font-size="medium"] {
+  --font-size-base: 16px;
+}
+[data-font-size="large"] {
+  --font-size-base: 18px;
+}
+
+html {
+  font-size: var(--font-size-base);
+}
+
+html,
+body {
+  height: 100%;
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background-color: #e5e5e5;
+}
+
+[data-theme="dark"] ::selection {
+  background-color: #3a3a3c;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.ProseMirror {
+  outline: none;
+  min-height: 50vh;
+}
+
+.ProseMirror p.is-editor-empty:first-child::before {
+  color: var(--color-ink-faint);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  font-style: italic;
+}
