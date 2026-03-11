@@ -16,9 +16,9 @@ export interface ChunkOptions {
 }
 
 const DEFAULT_OPTIONS: ChunkOptions = {
-  maxChunkSize: 200,  // Reduced from 500 to create more fine-grained imagery atoms
-  minChunkSize: 30,   // Reduced from 50 to capture shorter meaningful phrases
-  overlap: 30,        // Reduced proportionally
+  maxChunkSize: 280,  // ~300 chars for more complete semantic units (was 200)
+  minChunkSize: 30,   // Keep short meaningful phrases
+  overlap: 100,       // 50% overlap for better context preservation (was 30)
   splitOn: /[。！？.!?\n]/, // sentence or line boundaries
 }
 

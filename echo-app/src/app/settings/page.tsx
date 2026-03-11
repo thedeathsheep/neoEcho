@@ -11,7 +11,7 @@ import { KnowledgeBaseManager } from '@/components/ui/knowledge-base-manager'
 import { CustomPromptManager } from '@/components/ui/custom-prompt-manager'
 import { knowledgeBaseService } from '@/services/knowledge-base.service'
 import { customPromptService } from '@/services/custom-prompt.service'
-import type { CustomPrompt, RibbonModuleConfig, RibbonSlotCount } from '@/types'
+import type { RibbonModuleConfig, RibbonSlotCount } from '@/types'
 
 const PRESETS = [
   { label: 'DeepSeek', url: 'https://api.deepseek.com', model: 'deepseek-chat' },
@@ -35,9 +35,13 @@ const RAG_PINNED_MAX = 3
 function RibbonModulesEditor({
   ribbonModules,
   setRibbonModules,
+  onAddCustomPrompt,
+  onEditModulePrompt,
 }: {
   ribbonModules: RibbonModuleConfig[]
   setRibbonModules: React.Dispatch<React.SetStateAction<RibbonModuleConfig[]>>
+  onAddCustomPrompt: () => void
+  onEditModulePrompt: (moduleId: string, currentPrompt?: string) => void
 }) {
   const byId = new Map(ribbonModules.map((m) => [m.id, m]))
   const activeBase = knowledgeBaseService.getActive()
@@ -86,11 +90,20 @@ function RibbonModulesEditor({
 
   return (
     <div className="space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-      <p className="text-xs text-[var(--color-ink-faint)] mb-2">
-        固定 {totalPinned}/{MAX_PINNED}（共鸣库强制检索在「共鸣库管理」中设置，最多 {RAG_PINNED_MAX} 本）
-      </p>
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-[var(--color-ink-faint)]">
+          固定 {totalPinned}/{MAX_PINNED}（共鸣库强制检索在「共鸣库管理」中设置，最多 {RAG_PINNED_MAX} 本）
+        </p>
+        <button
+          onClick={onAddCustomPrompt}
+          className="text-xs px-2 py-1 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5 transition-colors flex items-center gap-1"
+        >
+          <span>+</span>
+          <span>添加自定义</span>
+        </button>
+      </div>
       {displayModules.map((mod) => (
-        <div key={mod.id} className="flex items-center gap-4 py-1.5">
+        <div key={mod.id} className="flex items-center gap-3 py-1.5 group">
           <input
             type="checkbox"
             id={`ribbon-enable-${mod.id}`}
@@ -101,6 +114,16 @@ function RibbonModulesEditor({
           <label htmlFor={`ribbon-enable-${mod.id}`} className="flex-1 text-sm text-[var(--color-ink)] min-w-0 truncate">
             {mod.label}
           </label>
+          {/* Edit button for AI modules (built-in and custom) */}
+          {mod.type !== 'rag' && (
+            <button
+              onClick={() => onEditModulePrompt(mod.id, mod.prompt)}
+              className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] px-2 py-0.5 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5"
+              title="编辑提示词"
+            >
+              编辑
+            </button>
+          )}
           {mod.type === 'rag' ? (
             <span className="text-xs text-[var(--color-ink-faint)]">
               强制 {ragFixedCount} 本
@@ -133,7 +156,6 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState(settings.apiKey)
   const [model, setModel] = useState(settings.model)
   const [baseUrl, setBaseUrl] = useState(settings.baseUrl)
-  const [activeCustomPrompt, setActiveCustomPrompt] = useState<CustomPrompt | null>(null)
   const [semanticExpansion, setSemanticExpansion] = useState(settings.semanticExpansion ?? false)
   const [ribbonAiFilter, setRibbonAiFilter] = useState(settings.ribbonAiFilter ?? false)
   const [ribbonFilterModel, setRibbonFilterModel] = useState(settings.ribbonFilterModel ?? '')
@@ -200,6 +222,10 @@ export default function SettingsPage() {
   const [showPromptManager, setShowPromptManager] = useState(false)
   const [kbStats, setKbStats] = useState({ baseCount: 0, totalFiles: 0 })
 
+  // Module prompt editing
+  const [editingModuleId, setEditingModuleId] = useState<string | null>(null)
+  const [editingModulePrompt, setEditingModulePrompt] = useState('')
+
   const handlePreset = (preset: (typeof PRESETS)[number]) => {
     setBaseUrl(preset.url)
     setModel(preset.model)
@@ -243,10 +269,25 @@ export default function SettingsPage() {
     }
   }, [refreshKbStats])
 
-  // Load custom prompt for display in management section
+  // Refresh ribbon modules when prompt manager closes (new prompts may have been added)
   useEffect(() => {
-    const prompt = customPromptService.getActive()
-    setActiveCustomPrompt(prompt)
+    if (!showPromptManager) {
+      // Re-sync custom prompts with ribbon modules
+      setRibbonModules((prev) => {
+        const allPrompts = customPromptService.getAll()
+        const existingIds = new Set(prev.map((m) => m.id))
+        const newPromptModules = allPrompts
+          .filter((p) => !existingIds.has(p.id))
+          .map((p) => ({
+            id: p.id,
+            type: 'custom' as const,
+            label: p.name,
+            enabled: false,
+            pinned: false,
+          }))
+        return [...prev, ...newPromptModules]
+      })
+    }
   }, [showPromptManager])
 
   const handleSave = () => {
@@ -314,11 +355,9 @@ export default function SettingsPage() {
   }
 
   const handlePromptSelect = (promptId: string) => {
-    customPromptService.setActive(promptId)
-    const prompt = customPromptService.get(promptId)
-    setActiveCustomPrompt(prompt)
+    // Custom prompts are now activated via ribbon modules (enabled checkbox)
+    // This callback is only used when selecting a prompt in the manager
     setShowPromptManager(false)
-    toast.success('已选择自定义提示词')
   }
 
   const statusColor: Record<ValidationStatus, string> = {
@@ -722,27 +761,38 @@ export default function SettingsPage() {
                 <RibbonModulesEditor
                   ribbonModules={ribbonModules}
                   setRibbonModules={setRibbonModules}
+                  onAddCustomPrompt={() => setShowPromptManager(true)}
+                  onEditModulePrompt={(moduleId, currentPrompt) => {
+                    setEditingModuleId(moduleId)
+                    setEditingModulePrompt(currentPrompt ?? '')
+                  }}
                 />
                 <p className="text-xs text-[var(--color-ink-faint)] mt-2">
-                  勾选的模块会同时生效，风格由各模块决定（意象 / 润色 / 叙事 / 引用等）。
+                  勾选的模块会同时生效，风格由各模块决定（意象 / 润色 / 叙事 / 引用等）。点击「+ 添加自定义」可创建新的提示词模块。
                 </p>
               </div>
 
-              {/* Semantic expansion for RAG */}
-              <div className="flex items-start gap-3">
+              {/* Semantic expansion for RAG - optimized copy */}
+              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
                 <input
                   type="checkbox"
                   id="semanticExpansion"
                   checked={semanticExpansion}
                   onChange={(e) => setSemanticExpansion(e.target.checked)}
-                  className="mt-1 rounded border-[var(--color-border)]"
+                  className="mt-0.5 rounded border-[var(--color-border)]"
                 />
                 <label htmlFor="semanticExpansion" className="flex-1 cursor-pointer">
                   <span className="block font-medium text-sm text-[var(--color-ink)]">
-                    语义扩展（织带检索）
+                    智能扩展查询词
+                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
+                      {semanticExpansion ? '已开启 · 召回优先' : '已关闭 · 速度优先'}
+                    </span>
                   </span>
-                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1">
-                    用 AI 将当前输入扩展为相关词再检索，例如写「春天」时也能匹配到描写春天但未出现该词的段落。需配置 API 且会多一次轻量请求。
+                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
+                    开启后，AI 会将「春天」扩展为「春天 花开 温暖 春风」等同义词再检索，能召回更多相关段落。
+                    <span className="text-[var(--color-ink-light)]">适合：找不到相关内容时尝试开启。</span>
+                    <br />
+                    <span className="text-[var(--color-accent)]">注意：会增加约 1-2 秒检索时间。</span>
                   </span>
                 </label>
               </div>
@@ -764,60 +814,6 @@ export default function SettingsPage() {
                     检索后用模型快速过滤掉页眉页脚、水印、元数据等低价值片段。过滤用模型在上方「织带过滤模型」中配置。
                   </span>
                 </label>
-              </div>
-
-              {/* Custom Prompt Management (for custom modules in content modules) */}
-              <div className="pt-4 border-t border-[var(--color-border)]">
-                <label className="block text-sm text-[var(--color-ink-light)] mb-3">
-                  自定义提示词
-                </label>
-
-                {activeCustomPrompt ? (
-                    <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg p-4">
-                      <div className="flex items-center justify-between mb-2">
-                        <div>
-                          <h4 className="font-medium text-[var(--color-ink)]">
-                            {activeCustomPrompt.name}
-                          </h4>
-                          {activeCustomPrompt.description && (
-                            <p className="text-xs text-[var(--color-ink-faint)]">
-                              {activeCustomPrompt.description}
-                            </p>
-                          )}
-                        </div>
-                        <span className="text-xs px-2 py-1 bg-[var(--color-ink)]/10 rounded text-[var(--color-ink)]">
-                          当前选中
-                        </span>
-                      </div>
-                      <p className="text-xs text-[var(--color-ink-faint)] line-clamp-2">
-                        {activeCustomPrompt.content.slice(0, 100)}
-                        {activeCustomPrompt.content.length > 100 ? '...' : ''}
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="bg-[var(--color-paper-warm)] border border-[var(--color-border)] rounded-lg p-4 text-sm text-[var(--color-ink-light)]">
-                      还没有选择自定义提示词
-                    </div>
-                  )}
-
-                  <div className="flex gap-2 mt-3">
-                    <button
-                      onClick={() => setShowPromptManager(true)}
-                      className="flex-1 px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5 transition-colors"
-                    >
-                      {activeCustomPrompt ? '切换提示词' : '选择提示词'}
-                    </button>
-                    <button
-                      onClick={() => setShowPromptManager(true)}
-                      className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5 transition-colors"
-                    >
-                      管理全部
-                    </button>
-                  </div>
-
-                <p className="text-xs text-[var(--color-ink-faint)] mt-2">
-                  创建的自定义提示词会出现在上方内容模块列表中，勾选后即可在织带中使用。
-                </p>
               </div>
 
               {/* Knowledge Base Management Link */}
@@ -929,8 +925,107 @@ export default function SettingsPage() {
         isOpen={showPromptManager}
         onClose={() => setShowPromptManager(false)}
         onSelect={handlePromptSelect}
-        selectedId={activeCustomPrompt?.id ?? undefined}
+        selectedId={undefined}
       />
+
+      {/* Module Prompt Edit Modal */}
+      {editingModuleId && (
+        <ModulePromptEditModal
+          isOpen={!!editingModuleId}
+          onClose={() => setEditingModuleId(null)}
+          moduleId={editingModuleId}
+          moduleLabel={BUILTIN_RIBBON_MODULES.find(m => m.id === editingModuleId)?.label ?? '自定义模块'}
+          currentPrompt={editingModulePrompt}
+          onSave={(prompt) => {
+            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt } : m))
+            setEditingModuleId(null)
+            toast.success('提示词已保存')
+          }}
+          onReset={() => {
+            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt: undefined } : m))
+            setEditingModuleId(null)
+            toast.success('已恢复默认提示词')
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// Modal for editing module prompt
+interface ModulePromptEditModalProps {
+  isOpen: boolean
+  onClose: () => void
+  moduleId: string
+  moduleLabel: string
+  currentPrompt: string
+  onSave: (prompt: string) => void
+  onReset: () => void
+}
+
+function ModulePromptEditModal({
+  isOpen,
+  onClose,
+  moduleLabel,
+  currentPrompt,
+  onSave,
+  onReset,
+}: ModulePromptEditModalProps) {
+  const [prompt, setPrompt] = useState(currentPrompt)
+
+  useEffect(() => {
+    setPrompt(currentPrompt)
+  }, [currentPrompt])
+
+  if (!isOpen) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="bg-[var(--color-surface)] rounded-lg border border-[var(--color-border)] shadow-lg w-full max-w-2xl max-h-[80vh] overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
+          <h3 className="font-medium text-[var(--color-ink)]">编辑提示词：{moduleLabel}</h3>
+          <button
+            onClick={onClose}
+            className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="p-4">
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            placeholder="输入自定义提示词，留空则使用默认提示词..."
+            className="w-full h-64 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm text-[var(--color-ink)] resize-none focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+          />
+          <p className="text-xs text-[var(--color-ink-faint)] mt-2">
+            自定义提示词将覆盖该模块的默认行为。清空并保存可恢复默认。
+          </p>
+        </div>
+        <div className="flex justify-between px-4 py-3 border-t border-[var(--color-border)]">
+          <button
+            onClick={onReset}
+            disabled={!currentPrompt}
+            className="px-4 py-2 text-sm text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] disabled:opacity-30"
+          >
+            恢复默认
+          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5"
+            >
+              取消
+            </button>
+            <button
+              onClick={() => onSave(prompt.trim())}
+              className="px-4 py-2 bg-[var(--color-accent)] text-white rounded-lg text-sm hover:opacity-90"
+            >
+              保存
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

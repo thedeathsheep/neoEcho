@@ -142,7 +142,7 @@ function EchoFragment({
             isAi ? 'text-[var(--color-accent)]' : 'text-[var(--color-ink-faint)]'
           }`}
         >
-          {isAi ? '灵感' : `来自 ${getSourceLabel(item.source)}`}
+          {isAi ? getSourceLabel(item.source) : `来自 ${getSourceLabel(item.source)}`}
         </span>
       </div>
     </motion.div>
@@ -183,14 +183,23 @@ export function AmbientRibbon({
     prevGeneratingRef.current = isGenerating
   }, [isGenerating])
 
-  // Alt+Q: enter browse (show first) -> cycle selection -> on last cell one more Alt+Q exits. Ref for selectedId to keep deps array size stable.
+  // Alt+Q: enter browse (show first) -> cycle selection -> on last cell one more Alt+Q exits.
+  // Use ref for echoes to avoid re-binding on every render when array reference changes.
+  const echoesRef = useRef(echoes)
+  useEffect(() => {
+    echoesRef.current = echoes
+  }, [echoes])
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!(e.altKey && (e.key === 'q' || e.key === 'Q'))) return
-      if (!hasContent || !ribbonCellsContainerRef.current) return
+      // Check hasContent via ref to avoid dependency churn
+      const currentEchoes = echoesRef.current
+      const hasAnyContent = currentEchoes.length > 0
+      if (!hasAnyContent) return
       e.preventDefault()
       e.stopPropagation()
-      const visible = echoes.slice(0, slotCount)
+      const visible = currentEchoes.slice(0, slotCount)
       if (visible.length === 0) return
 
       const currentId = selectedEchoIdRef.current
@@ -208,7 +217,8 @@ export function AmbientRibbon({
     }
     document.addEventListener('keydown', handler, true)
     return () => document.removeEventListener('keydown', handler, true)
-  }, [hasContent, echoes, slotCount, onRibbonSelect])
+    // Only re-bind when slotCount or onRibbonSelect changes (stable references)
+  }, [slotCount, onRibbonSelect])
 
   return (
     <div className="absolute inset-x-0 top-16 h-56 z-30 pointer-events-none overflow-hidden max-w-3xl mx-auto left-0 right-0">

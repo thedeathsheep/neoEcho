@@ -24,6 +24,10 @@ const JITTER_FACTOR = 0.2
 const MAX_RESULTS = 5
 const VECTOR_WEIGHT = 0.7
 const KEYWORD_WEIGHT = 0.3
+/** Minimum hybrid score to consider "strongly relevant"; reserve top-2 slots for these when possible. */
+const STRONG_RELEVANCE_MIN = 0.15
+/** Only add random fill when we have at least one result above this (avoid diluting strong relevance). */
+const RANDOM_FILL_MIN_SCORE = 0.12
 
 interface ScoredChunk {
   chunk: KnowledgeChunk
@@ -81,6 +85,24 @@ function applySemanticJitter(scored: ScoredChunk[]): ScoredChunk[] {
     ...item,
     score: item.score * (1 - JITTER_FACTOR * Math.random()),
   }))
+}
+
+/**
+ * Take up to 2 by raw score (no jitter) when they meet STRONG_RELEVANCE_MIN, so top slots are truly relevant.
+ * Fill the rest from jittered pool. Ensures the first one or two slots are strongly relevant when available.
+ */
+function takeTopWithReservedStrong(
+  scored: ScoredChunk[],
+  limit: number,
+): ScoredChunk[] {
+  const byScore = scored.filter((s) => s.score > 0.001).sort((a, b) => b.score - a.score)
+  const strong = byScore.filter((s) => s.score >= STRONG_RELEVANCE_MIN)
+  const top2 = strong.slice(0, 2)
+  const top2Ids = new Set(top2.map((t) => t.chunk.id))
+  const rest = byScore.filter((s) => !top2Ids.has(s.chunk.id))
+  const jitteredRest = applySemanticJitter(rest).sort((a, b) => b.score - a.score)
+  const filled = [...top2, ...jitteredRest.slice(0, Math.max(0, limit - top2.length))]
+  return filled.slice(0, limit)
 }
 
 function toEchoItem(scored: ScoredChunk, blockId?: string): EchoItem {
@@ -226,19 +248,16 @@ async function searchWithMandatoryBooks(
       query,
       hasEmbeddings,
     )
-    const jittered = applySemanticJitter(scored)
-
-    const topResults = jittered
-      .filter((s) => s.score > 0.001)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, remainingSlots)
+    const topResults = takeTopWithReservedStrong(scored, remainingSlots)
 
     topResults.forEach((r) => {
       results.push(toEchoItem(r, blockId))
     })
 
-    // If still not enough (e.g. base has only mandatory books), fill from mandatory pool
-    if (results.length < MAX_RESULTS) {
+    // If still not enough (e.g. base has only mandatory books), fill from pool only when we have some relevance
+    const bestScoreInRest = topResults.length > 0 ? Math.max(...topResults.map((r) => r.score)) : 0
+    const allowFallbackFill = bestScoreInRest >= RANDOM_FILL_MIN_SCORE
+    if (results.length < MAX_RESULTS && allowFallbackFill) {
       const fallbackPool = allChunks != null ? allChunks : await getChunksByBase(baseId)
       const usedIds = new Set(results.map((r) => r.id))
       const fallbackChunks = fallbackPool.filter(
@@ -285,15 +304,12 @@ async function searchRegular(
 
   const hasEmbeddings = allChunksRes.some((c) => c.embedding?.length)
   const scored = await scoreChunks(allChunksRes, query, hasEmbeddings)
-  const jittered = applySemanticJitter(scored)
+  const topResults = takeTopWithReservedStrong(scored, MAX_RESULTS)
 
-  let topResults = jittered
-    .filter((s) => s.score > 0.001)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, MAX_RESULTS)
-
-  // Fallback: Random fill if results are sparse
-  if (topResults.length < MAX_RESULTS && allChunksRes.length > 0) {
+  // Only add random fill when we already have at least one reasonably relevant result (avoid diluting strong relevance)
+  const bestScore = topResults.length > 0 ? Math.max(...topResults.map((r) => r.score)) : 0
+  const allowRandomFill = bestScore >= RANDOM_FILL_MIN_SCORE
+  if (topResults.length < MAX_RESULTS && allChunksRes.length > 0 && allowRandomFill) {
     const selectedIds = new Set(topResults.map((r) => r.chunk.id))
     const availableChunks = allChunksRes.filter(
       (c) => !selectedIds.has(c.id),
@@ -308,7 +324,7 @@ async function searchRegular(
       type: 'lit',
     }))
 
-    topResults = [...topResults, ...randomScored]
+    topResults.push(...randomScored)
   }
 
   return topResults.map((r) => toEchoItem(r, blockId))

@@ -216,7 +216,7 @@ export default function Home() {
               text,
               ragResults,
               { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model },
-              { type: mod.type, id: mod.id },
+              { type: mod.type, id: mod.id, prompt: mod.prompt },
               bid,
             )
             return { mod, items }

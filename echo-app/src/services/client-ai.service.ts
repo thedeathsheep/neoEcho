@@ -125,13 +125,15 @@ function getSystemPrompt(mode: AIMode): string {
 }
 
 /** Get system prompt for a ribbon module (by type and id for custom). */
-function getSystemPromptForRibbonModule(type: RibbonModuleType, id: string): string {
+function getSystemPromptForRibbonModule(type: RibbonModuleType, id: string, customPrompt?: string): string {
   if (type === 'custom') {
     const prompt = customPromptService.get(id)
     if (prompt?.content?.trim()) return prompt.content.trim()
     return DEFAULT_SYSTEM_PROMPTS.imagery
   }
   if (type.startsWith('ai:')) {
+    // Use custom prompt override if provided
+    if (customPrompt?.trim()) return customPrompt.trim()
     const mode = type.replace('ai:', '') as Exclude<AIMode, 'custom'>
     if (mode in DEFAULT_SYSTEM_PROMPTS) return DEFAULT_SYSTEM_PROMPTS[mode]
   }
@@ -147,6 +149,25 @@ function ribbonTypeToAIMode(type: RibbonModuleType): AIMode {
     if (m in DEFAULT_SYSTEM_PROMPTS) return m
   }
   return 'imagery'
+}
+
+/** Get display label for a ribbon module (shown in ribbon cell). */
+function getModuleDisplayLabel(type: RibbonModuleType, id: string): string {
+  if (type === 'custom') {
+    const prompt = customPromptService.get(id)
+    if (prompt?.name) return `自定义-${prompt.name}`
+    return '自定义'
+  }
+  const labels: Record<string, string> = {
+    'ai:imagery': 'AI 意象',
+    'ai:polish': 'AI 润色',
+    'ai:narrative': 'AI 叙事',
+    'ai:quote': 'AI 引用',
+  }
+  if (type.startsWith('ai:')) {
+    return labels[type] || 'AI 生成'
+  }
+  return 'AI 生成'
 }
 
 function buildUserPromptByMode(
@@ -372,13 +393,13 @@ export async function generateEchoesForModule(
   context: string,
   ragResults: EchoItem[],
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
-  module: { type: RibbonModuleType; id: string },
+  module: { type: RibbonModuleType; id: string; prompt?: string },
   blockId?: string,
 ): Promise<EchoItem[]> {
   if (!settings.apiKey || (module.type !== 'custom' && !module.type.startsWith('ai:'))) {
     return []
   }
-  const systemPrompt = getSystemPromptForRibbonModule(module.type, module.id)
+  const systemPrompt = getSystemPromptForRibbonModule(module.type, module.id, module.prompt)
   const mode = ribbonTypeToAIMode(module.type)
   const userContent = buildUserPromptByMode(context, ragResults, mode)
 
@@ -432,7 +453,8 @@ export async function generateEchoesForModule(
 
   const data = (await res.json()) as ChatCompletionResponse
   const text = data.choices?.[0]?.message?.content ?? ''
-  const sourceLabel = module.type === 'custom' ? 'AI' : 'AI'
+  // Map module type to display label
+  const sourceLabel = getModuleDisplayLabel(module.type, module.id)
 
   return text
     .split('\n')

@@ -11,6 +11,8 @@ export interface RibbonModuleConfig {
   label: string
   enabled: boolean
   pinned: boolean
+  /** Custom prompt override for built-in AI modules (ai:imagery, ai:polish, etc.) */
+  prompt?: string
 }
 
 export type RibbonSlotCount = 5 | 6 | 7 | 8
