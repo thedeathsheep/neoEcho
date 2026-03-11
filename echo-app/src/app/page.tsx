@@ -203,8 +203,43 @@ export default function Home() {
           : 0
       const fixedPool: EchoItem[] = ragResults.slice(0, ragFixedCount)
 
-      const aiModules = enabledModules.filter((m: RibbonModuleConfig) => m.type !== 'rag' && (m.type.startsWith('ai:') || m.type === 'custom'))
+      // Separate quick modules (no RAG wait) from other AI modules
+      const quickModules = enabledModules.filter((m: RibbonModuleConfig) => m.type === 'quick')
+      const aiModules = enabledModules.filter((m: RibbonModuleConfig) => m.type !== 'rag' && m.type !== 'quick' && (m.type.startsWith('ai:') || m.type === 'custom'))
       const aiResultsByModuleId: Record<string, EchoItem[]> = {}
+      const quickResultsByModuleId: Record<string, EchoItem[]> = {}
+
+      // Start quick modules immediately (don't wait for RAG)
+      if (hasApiKey && quickModules.length > 0) {
+        setAiStatus('loading')
+        devLog.push('ribbon', 'Quick modules start (parallel with RAG)', { count: quickModules.length })
+        const quickPromises = quickModules.map(async (mod) => {
+          try {
+            const items = await generateEchoesForModule(
+              text,
+              [], // Quick modules don't use RAG results
+              { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model },
+              { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
+              bid,
+            )
+            return { mod, items }
+          } catch {
+            return { mod, items: [] as EchoItem[] }
+          }
+        })
+        const quickResultsList = await Promise.all(quickPromises)
+        quickResultsList.forEach(({ mod, items }) => {
+          quickResultsByModuleId[mod.id] = items
+          if (mod.pinned && items.length > 0) {
+            fixedPool.push(items[0])
+          }
+        })
+        devLog.push('ribbon', 'Quick modules done', {
+          byModule: Object.fromEntries(
+            Object.entries(quickResultsByModuleId).map(([k, v]) => [k, v.length]),
+          ),
+        })
+      }
 
       if (hasApiKey && aiModules.length > 0) {
         setAiStatus('loading')
@@ -216,7 +251,7 @@ export default function Home() {
               text,
               ragResults,
               { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model },
-              { type: mod.type, id: mod.id, prompt: mod.prompt },
+              { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
               bid,
             )
             return { mod, items }
@@ -239,7 +274,7 @@ export default function Home() {
         })
       }
 
-      const allResults: EchoItem[] = [...ragResults, ...Object.values(aiResultsByModuleId).flat()]
+      const allResults: EchoItem[] = [...ragResults, ...Object.values(aiResultsByModuleId).flat(), ...Object.values(quickResultsByModuleId).flat()]
       const fixedIds = new Set(fixedPool.map((x) => x.id))
       const randomPool = allResults.filter((x) => !fixedIds.has(x.id))
       const shuffled = shuffle(randomPool)

@@ -35,11 +35,12 @@ export interface Settings {
 }
 
 export const BUILTIN_RIBBON_MODULES: Omit<RibbonModuleConfig, 'enabled' | 'pinned'>[] = [
-  { id: 'rag', type: 'rag', label: '共鸣库检索' },
-  { id: 'ai:imagery', type: 'ai:imagery', label: 'AI 意象' },
-  { id: 'ai:polish', type: 'ai:polish', label: 'AI 词语润色' },
-  { id: 'ai:narrative', type: 'ai:narrative', label: 'AI 叙事引导' },
-  { id: 'ai:quote', type: 'ai:quote', label: 'AI 经典引用' },
+  { id: 'rag', type: 'rag', label: '林深人不知' },
+  { id: 'ai:imagery', type: 'ai:imagery', label: '笔落惊风雨' },
+  { id: 'ai:polish', type: 'ai:polish', label: '推敲月下门' },
+  { id: 'ai:narrative', type: 'ai:narrative', label: '曲径通幽处' },
+  { id: 'ai:quote', type: 'ai:quote', label: '读书破万卷' },
+  { id: 'quick:helper', type: 'quick', label: '文章本天成' },
 ]
 
 function getDefaultRibbonSettings(): RibbonSettings {

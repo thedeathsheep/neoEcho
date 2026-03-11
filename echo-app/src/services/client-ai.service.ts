@@ -1,4 +1,5 @@
 import type { Settings } from '@/lib/settings-context'
+import { BUILTIN_RIBBON_MODULES } from '@/lib/settings-context'
 import type { AIMode, EchoItem } from '@/types'
 import type { RibbonModuleType } from '@/types'
 import { customPromptService } from './custom-prompt.service'
@@ -75,7 +76,7 @@ export async function validateApiKey(
 }
 
 // Default system prompts for preset AI modes
-const DEFAULT_SYSTEM_PROMPTS: Record<Exclude<AIMode, 'custom'>, string> = {
+export const DEFAULT_SYSTEM_PROMPTS: Record<Exclude<AIMode, 'custom'>, string> = {
   polish: `你是词语炼金师。基于用户正在写作的内容，提供3-5条词语润色建议。
 规则：
 - 每条建议不超过25字
@@ -112,6 +113,15 @@ const DEFAULT_SYSTEM_PROMPTS: Record<Exclude<AIMode, 'custom'>, string> = {
 - 格式："引文内容"——作者《作品》`,
 }
 
+// Default prompt for quick response module (no RAG)
+const DEFAULT_QUICK_PROMPT = `你是文思泉涌的灵感助手。基于用户正在写作的内容，给出简短、有用的建议或反馈，帮助用户改进写作。
+规则：
+- 回复控制在50字以内
+- 不要编号、不要解释过多
+- 直接给出建议
+- 聚焦：写作技巧、情感表达、结构优化
+- 风格：简洁、启发性、有文学感`
+
 // Get system prompt based on mode and custom prompt
 function getSystemPrompt(mode: AIMode): string {
   if (mode === 'custom') {
@@ -126,7 +136,13 @@ function getSystemPrompt(mode: AIMode): string {
 
 /** Get system prompt for a ribbon module (by type and id for custom). */
 function getSystemPromptForRibbonModule(type: RibbonModuleType, id: string, customPrompt?: string): string {
+  if (type === 'quick') {
+    // quick modules use customPrompt directly, or fall back to default
+    if (customPrompt?.trim()) return customPrompt.trim()
+    return DEFAULT_QUICK_PROMPT
+  }
   if (type === 'custom') {
+    // For custom type, try to get from service
     const prompt = customPromptService.get(id)
     if (prompt?.content?.trim()) return prompt.content.trim()
     return DEFAULT_SYSTEM_PROMPTS.imagery
@@ -142,7 +158,7 @@ function getSystemPromptForRibbonModule(type: RibbonModuleType, id: string, cust
 
 /** Map ribbon module type to AIMode for user prompt building. */
 function ribbonTypeToAIMode(type: RibbonModuleType): AIMode {
-  if (type === 'custom') return 'custom'
+  if (type === 'custom' || type === 'quick') return 'custom'
   if (type === 'rag') return 'imagery'
   if (type.startsWith('ai:')) {
     const m = type.replace('ai:', '') as Exclude<AIMode, 'custom'>
@@ -151,12 +167,75 @@ function ribbonTypeToAIMode(type: RibbonModuleType): AIMode {
   return 'imagery'
 }
 
+/** Get default system prompt for a module type (for settings UI). */
+export function getDefaultPromptForModule(type: RibbonModuleType): string | null {
+  if (type === 'custom') return null
+  if (type === 'quick') return DEFAULT_QUICK_PROMPT
+  if (type.startsWith('ai:')) {
+    const mode = type.replace('ai:', '') as Exclude<AIMode, 'custom'>
+    if (mode in DEFAULT_SYSTEM_PROMPTS) return DEFAULT_SYSTEM_PROMPTS[mode]
+  }
+  return null
+}
+
+/** Generate a prompt from description using AI. */
+export async function generatePromptFromDescription(
+  description: string,
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
+): Promise<string> {
+  if (!settings.apiKey || !description.trim()) {
+    return ''
+  }
+
+  const systemPrompt = `你是提示词工程师。根据用户的描述，生成一个完整的系统提示词（system prompt）。
+要求：
+- 提示词应明确、具体、可执行
+- 包含角色定义、任务描述、输出规则
+- 使用中文
+- 直接输出提示词内容，不要解释`
+
+  try {
+    const res = await fetch(apiUrl(settings.baseUrl, '/chat/completions'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${settings.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: settings.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `请根据以下描述生成系统提示词：\n\n${description.trim()}` },
+        ],
+        temperature: 0.7,
+        max_tokens: 512,
+      }),
+      signal: AbortSignal.timeout(10000),
+    })
+
+    if (!res.ok) {
+      throw new Error(`API error: ${res.status}`)
+    }
+
+    const data = (await res.json()) as ChatCompletionResponse
+    return (data.choices?.[0]?.message?.content ?? '').trim()
+  } catch {
+    return ''
+  }
+}
+
 /** Get display label for a ribbon module (shown in ribbon cell). */
 function getModuleDisplayLabel(type: RibbonModuleType, id: string): string {
   if (type === 'custom') {
     const prompt = customPromptService.get(id)
     if (prompt?.name) return `自定义-${prompt.name}`
     return '自定义'
+  }
+  if (type === 'quick') {
+    // Quick modules use their label directly
+    const builtin = BUILTIN_RIBBON_MODULES.find(m => m.id === id)
+    if (builtin?.label) return builtin.label
+    return '快速助手'
   }
   const labels: Record<string, string> = {
     'ai:imagery': 'AI 意象',
@@ -393,20 +472,30 @@ export async function generateEchoesForModule(
   context: string,
   ragResults: EchoItem[],
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
-  module: { type: RibbonModuleType; id: string; prompt?: string },
+  module: { type: RibbonModuleType; id: string; prompt?: string; model?: string },
   blockId?: string,
 ): Promise<EchoItem[]> {
-  if (!settings.apiKey || (module.type !== 'custom' && !module.type.startsWith('ai:'))) {
+  // Support: ai:*, custom, quick types
+  const isSupported = module.type.startsWith('ai:') || module.type === 'custom' || module.type === 'quick'
+  if (!settings.apiKey || !isSupported) {
     return []
   }
+
   const systemPrompt = getSystemPromptForRibbonModule(module.type, module.id, module.prompt)
   const mode = ribbonTypeToAIMode(module.type)
-  const userContent = buildUserPromptByMode(context, ragResults, mode)
+
+  // Quick modules don't use RAG results - they respond directly to context
+  const userContent = module.type === 'quick'
+    ? `当前文本：\n${context}\n\n请根据以上文本，直接给出你的回应。`
+    : buildUserPromptByMode(context, ragResults, mode)
 
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userContent },
   ]
+
+  // Use module-specific model if set, otherwise fall back to global model
+  const modelToUse = module.model?.trim() || settings.model
 
   let res: Response
   try {
@@ -417,7 +506,7 @@ export async function generateEchoesForModule(
         Authorization: `Bearer ${settings.apiKey}`,
       },
       body: JSON.stringify({
-        model: settings.model,
+        model: modelToUse,
         messages,
         temperature: 0.85,
         max_tokens: 256,

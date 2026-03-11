@@ -82,10 +82,11 @@ export function EchoEditor({
   useEffect(() => {
     if (editor && !editor.isDestroyed && !hasReportedInitialContent.current) {
       hasReportedInitialContent.current = true
+      // Only report content change (for save), don't trigger ribbon update
       const nodeId = editor.state.selection.$anchor.parent.attrs.nodeId ?? null
-      onUpdate?.(editor.getText(), nodeId)
+      onContentChange?.(editor.getHTML())
     }
-  }, [editor, onUpdate])
+  }, [editor, onContentChange])
 
   return (
     <div className="w-full max-w-3xl mx-auto px-8 min-h-[50vh]">

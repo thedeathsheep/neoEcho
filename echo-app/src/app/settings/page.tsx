@@ -5,13 +5,13 @@ import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 
 import { useSettings, BUILTIN_RIBBON_MODULES } from '@/lib/settings-context'
-import { validateApiKey } from '@/services/client-ai.service'
+import { validateApiKey, getDefaultPromptForModule, generatePromptFromDescription, DEFAULT_SYSTEM_PROMPTS } from '@/services/client-ai.service'
 import { validateEmbeddingApi } from '@/services/embedding.service'
 import { KnowledgeBaseManager } from '@/components/ui/knowledge-base-manager'
-import { CustomPromptManager } from '@/components/ui/custom-prompt-manager'
+import { AboutModal } from '@/components/help/about-modal'
 import { knowledgeBaseService } from '@/services/knowledge-base.service'
 import { customPromptService } from '@/services/custom-prompt.service'
-import type { RibbonModuleConfig, RibbonSlotCount } from '@/types'
+import type { RibbonModuleConfig, RibbonSlotCount, RibbonModuleType } from '@/types'
 
 const PRESETS = [
   { label: 'DeepSeek', url: 'https://api.deepseek.com', model: 'deepseek-chat' },
@@ -41,12 +41,19 @@ function RibbonModulesEditor({
   ribbonModules: RibbonModuleConfig[]
   setRibbonModules: React.Dispatch<React.SetStateAction<RibbonModuleConfig[]>>
   onAddCustomPrompt: () => void
-  onEditModulePrompt: (moduleId: string, currentPrompt?: string) => void
+  onEditModulePrompt: (moduleId: string, moduleType: RibbonModuleType, currentPrompt?: string, currentModel?: string, currentLabel?: string) => void
 }) {
+  const [ragFixedCount, setRagFixedCount] = useState(0)
+  const [customPrompts, setCustomPrompts] = useState<{ id: string; name: string }[]>([])
+
+  // Load client-side data after hydration
+  useEffect(() => {
+    const activeBase = knowledgeBaseService.getActive()
+    setRagFixedCount(Math.min(RAG_PINNED_MAX, activeBase?.mandatoryBooks?.length ?? 0))
+    setCustomPrompts(customPromptService.getAll())
+  }, [])
+
   const byId = new Map(ribbonModules.map((m) => [m.id, m]))
-  const activeBase = knowledgeBaseService.getActive()
-  const ragFixedCount = Math.min(RAG_PINNED_MAX, activeBase?.mandatoryBooks?.length ?? 0)
-  const customPrompts = customPromptService.getAll()
 
   const builtin = BUILTIN_RIBBON_MODULES.map((b) => ({
     ...b,
@@ -77,6 +84,10 @@ function RibbonModulesEditor({
       if (customP) return [...prev, { id: customP.id, type: 'custom', label: customP.name, enabled: next.enabled ?? false, pinned: next.pinned ?? false }]
       return prev
     })
+  }
+
+  const getModuleLabel = (mod: RibbonModuleConfig) => {
+    return mod.label
   }
 
   const setPinned = (mod: RibbonModuleConfig, pinned: boolean) => {
@@ -112,14 +123,14 @@ function RibbonModulesEditor({
             className="rounded border-[var(--color-border)]"
           />
           <label htmlFor={`ribbon-enable-${mod.id}`} className="flex-1 text-sm text-[var(--color-ink)] min-w-0 truncate">
-            {mod.label}
+            {getModuleLabel(mod)}
           </label>
-          {/* Edit button for AI modules (built-in and custom) */}
+          {/* Edit button for AI modules (built-in, custom, and quick) */}
           {mod.type !== 'rag' && (
             <button
-              onClick={() => onEditModulePrompt(mod.id, mod.prompt)}
+              onClick={() => onEditModulePrompt(mod.id, mod.type, mod.prompt, mod.model, mod.label)}
               className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] px-2 py-0.5 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5"
-              title="编辑提示词"
+              title="编辑模块"
             >
               编辑
             </button>
@@ -219,12 +230,16 @@ export default function SettingsPage() {
   const [availableModels, setAvailableModels] = useState<string[]>([])
   const [showPresets, setShowPresets] = useState(false)
   const [showKbManager, setShowKbManager] = useState(false)
-  const [showPromptManager, setShowPromptManager] = useState(false)
+  const [showAddModule, setShowAddModule] = useState(false)
+  const [showAbout, setShowAbout] = useState(false)
   const [kbStats, setKbStats] = useState({ baseCount: 0, totalFiles: 0 })
 
   // Module prompt editing
   const [editingModuleId, setEditingModuleId] = useState<string | null>(null)
+  const [editingModuleType, setEditingModuleType] = useState<RibbonModuleType>('custom')
   const [editingModulePrompt, setEditingModulePrompt] = useState('')
+  const [editingModuleModel, setEditingModuleModel] = useState<string | undefined>(undefined)
+  const [editingModuleLabel, setEditingModuleLabel] = useState<string | undefined>(undefined)
 
   const handlePreset = (preset: (typeof PRESETS)[number]) => {
     setBaseUrl(preset.url)
@@ -269,26 +284,7 @@ export default function SettingsPage() {
     }
   }, [refreshKbStats])
 
-  // Refresh ribbon modules when prompt manager closes (new prompts may have been added)
-  useEffect(() => {
-    if (!showPromptManager) {
-      // Re-sync custom prompts with ribbon modules
-      setRibbonModules((prev) => {
-        const allPrompts = customPromptService.getAll()
-        const existingIds = new Set(prev.map((m) => m.id))
-        const newPromptModules = allPrompts
-          .filter((p) => !existingIds.has(p.id))
-          .map((p) => ({
-            id: p.id,
-            type: 'custom' as const,
-            label: p.name,
-            enabled: false,
-            pinned: false,
-          }))
-        return [...prev, ...newPromptModules]
-      })
-    }
-  }, [showPromptManager])
+  // Custom module management is now handled directly in the module editor
 
   const handleSave = () => {
     updateSettings({
@@ -354,10 +350,18 @@ export default function SettingsPage() {
     }
   }
 
-  const handlePromptSelect = (promptId: string) => {
-    // Custom prompts are now activated via ribbon modules (enabled checkbox)
-    // This callback is only used when selecting a prompt in the manager
-    setShowPromptManager(false)
+  const handleAddCustomModule = (name: string, prompt: string) => {
+    const newModule: RibbonModuleConfig = {
+      id: `custom-${Date.now()}`,
+      type: 'custom',
+      label: name,
+      enabled: true,
+      pinned: false,
+      prompt,
+    }
+    setRibbonModules(prev => [...prev, newModule])
+    setShowAddModule(false)
+    toast.success(`已添加自定义模块「${name}」`)
   }
 
   const statusColor: Record<ValidationStatus, string> = {
@@ -385,9 +389,14 @@ export default function SettingsPage() {
             className={`bg-[var(--color-paper-warm)] backdrop-blur rounded-xl border-2 p-6 transition-colors ${statusColor[validationStatus]}`}
           >
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-medium text-[var(--color-ink)]">
-                AI 配置
-              </h2>
+              <div>
+                <h2 className="text-lg font-medium text-[var(--color-ink)]">
+                  主模型配置
+                </h2>
+                <p className="text-xs text-[var(--color-ink-faint)] mt-0.5">
+                  用于织带AI模块生成内容（意象/润色/叙事/引用等）
+                </p>
+              </div>
               {validationStatus === 'success' && (
                 <span className="flex items-center gap-1.5 text-xs text-green-600 font-medium">
                   <span className="w-2 h-2 rounded-full bg-green-500" />
@@ -528,10 +537,10 @@ export default function SettingsPage() {
           {/* Embedding API Section */}
           <section className="bg-[var(--color-paper-warm)] backdrop-blur rounded-xl border border-[var(--color-border)] p-6">
             <h2 className="text-lg font-medium text-[var(--color-ink)] mb-2">
-              嵌入模型（织带语义检索）
+              嵌入模型配置
             </h2>
             <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-              使用 API 嵌入可显著提升中文语义检索效果；不配置则使用本地模型（易失败或效果一般）。
+              用于织带语义检索（RAG）。使用 API 嵌入可显著提升中文语义检索效果；不配置则使用本地模型（易失败或效果一般）。
             </p>
             <div className="flex items-start gap-3 mb-4">
               <input
@@ -648,10 +657,10 @@ export default function SettingsPage() {
           {/* Ribbon filter model (same API as main chat, optional different model) */}
           <section className="bg-[var(--color-paper-warm)] backdrop-blur rounded-xl border border-[var(--color-border)] p-6">
             <h2 className="text-lg font-medium text-[var(--color-ink)] mb-2">
-              织带过滤模型（织带结果 AI 过滤）
+              过滤模型配置
             </h2>
             <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-              使用主 API（上方对话接口），仅模型可不同。留空则使用主模型；可填小模型名（如 deepseek-chat、qwen-turbo）以提速。需先在「织带偏好」中开启「织带结果经 AI 过滤」。
+              用于织带结果 AI 过滤（去除页眉页脚等低价值片段）。使用主 API（上方对话接口），仅模型可不同。留空则使用主模型；可填小模型名（如 deepseek-chat、qwen-turbo）以提速。需先在「织带偏好」中开启「织带结果经 AI 过滤」。
             </p>
             <div>
               <label className="block text-sm text-[var(--color-ink-light)] mb-2">过滤用小模型</label>
@@ -761,10 +770,13 @@ export default function SettingsPage() {
                 <RibbonModulesEditor
                   ribbonModules={ribbonModules}
                   setRibbonModules={setRibbonModules}
-                  onAddCustomPrompt={() => setShowPromptManager(true)}
-                  onEditModulePrompt={(moduleId, currentPrompt) => {
+                  onAddCustomPrompt={() => setShowAddModule(true)}
+                  onEditModulePrompt={(moduleId, moduleType, currentPrompt, currentModel, currentLabel) => {
                     setEditingModuleId(moduleId)
+                    setEditingModuleType(moduleType)
                     setEditingModulePrompt(currentPrompt ?? '')
+                    setEditingModuleModel(currentModel)
+                    setEditingModuleLabel(currentLabel)
                   }}
                 />
                 <p className="text-xs text-[var(--color-ink-faint)] mt-2">
@@ -900,7 +912,13 @@ export default function SettingsPage() {
             </div>
           </section>
 
-          <div className="flex justify-end pt-4">
+          <div className="flex justify-between items-center pt-4">
+            <button
+              onClick={() => setShowAbout(true)}
+              className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm text-[var(--color-ink-light)] hover:text-[var(--color-ink)] hover:bg-[var(--color-ink)]/5 transition-colors"
+            >
+              关于 / 帮助
+            </button>
             <button
               onClick={handleSave}
               className="px-6 py-2 bg-[var(--color-btn-primary-bg)] text-[var(--color-btn-primary-text)] rounded-lg hover:opacity-90 transition-opacity"
@@ -920,13 +938,14 @@ export default function SettingsPage() {
         }}
       />
 
-      {/* Custom Prompt Manager Modal */}
-      <CustomPromptManager
-        isOpen={showPromptManager}
-        onClose={() => setShowPromptManager(false)}
-        onSelect={handlePromptSelect}
-        selectedId={undefined}
-      />
+      {/* Add Custom Module Modal */}
+      {showAddModule && (
+        <AddCustomModuleModal
+          isOpen={showAddModule}
+          onClose={() => setShowAddModule(false)}
+          onAdd={handleAddCustomModule}
+        />
+      )}
 
       {/* Module Prompt Edit Modal */}
       {editingModuleId && (
@@ -934,20 +953,125 @@ export default function SettingsPage() {
           isOpen={!!editingModuleId}
           onClose={() => setEditingModuleId(null)}
           moduleId={editingModuleId}
-          moduleLabel={BUILTIN_RIBBON_MODULES.find(m => m.id === editingModuleId)?.label ?? '自定义模块'}
+          moduleType={editingModuleType}
+          moduleLabel={ribbonModules.find(m => m.id === editingModuleId)?.label ?? BUILTIN_RIBBON_MODULES.find(m => m.id === editingModuleId)?.label ?? '自定义模块'}
           currentPrompt={editingModulePrompt}
-          onSave={(prompt) => {
-            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt } : m))
+          currentModel={editingModuleModel}
+          currentLabel={editingModuleLabel}
+          onSave={(prompt, model, label) => {
+            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt, model, label } : m))
             setEditingModuleId(null)
-            toast.success('提示词已保存')
+            toast.success('模块配置已保存')
           }}
           onReset={() => {
-            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt: undefined } : m))
+            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt: undefined, model: undefined, label: undefined } : m))
             setEditingModuleId(null)
-            toast.success('已恢复默认提示词')
+            toast.success('已恢复默认配置')
           }}
         />
       )}
+
+      {/* About / Help Modal */}
+      <AboutModal
+        isOpen={showAbout}
+        onClose={() => setShowAbout(false)}
+      />
+    </div>
+  )
+}
+
+// Modal for adding custom module
+interface AddCustomModuleModalProps {
+  isOpen: boolean
+  onClose: () => void
+  onAdd: (name: string, prompt: string) => void
+}
+
+function AddCustomModuleModal({ isOpen, onClose, onAdd }: AddCustomModuleModalProps) {
+  const { settings } = useSettings()
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [prompt, setPrompt] = useState('')
+  const [isGenerating, setIsGenerating] = useState(false)
+
+  useEffect(() => {
+    if (isOpen) {
+      setName('')
+      setDescription('')
+      setPrompt('')
+    }
+  }, [isOpen])
+
+  const handleGenerate = async () => {
+    if (!description.trim() || !settings.apiKey) return
+    setIsGenerating(true)
+    const generated = await generatePromptFromDescription(description, settings)
+    if (generated) {
+      setPrompt(generated)
+    }
+    setIsGenerating(false)
+  }
+
+  if (!isOpen) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="bg-[var(--color-surface)] rounded-lg border border-[var(--color-border)] shadow-lg w-full max-w-2xl max-h-[80vh] overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
+          <h3 className="font-medium text-[var(--color-ink)]">添加自定义模块</h3>
+          <button onClick={onClose} className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]">✕</button>
+        </div>
+        <div className="p-4 space-y-4">
+          <div>
+            <label className="block text-sm text-[var(--color-ink-light)] mb-1">模块名称</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="例如：诗歌润色"
+              className="w-full px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-[var(--color-ink-light)] mb-1">提示词描述（可选）</label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="描述你想要的提示词效果，点击右侧按钮让AI生成..."
+                className="flex-1 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm"
+              />
+              <button
+                onClick={handleGenerate}
+                disabled={!description.trim() || !settings.apiKey || isGenerating}
+                className="px-3 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5 disabled:opacity-40"
+              >
+                {isGenerating ? '生成中...' : 'AI生成'}
+              </button>
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm text-[var(--color-ink-light)] mb-1">提示词内容</label>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="输入系统提示词，定义AI的角色和任务..."
+              className="w-full h-48 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm resize-none"
+            />
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 px-4 py-3 border-t border-[var(--color-border)]">
+          <button onClick={onClose} className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm">取消</button>
+          <button
+            onClick={() => { if (name.trim() && prompt.trim()) { onAdd(name.trim(), prompt.trim()) } }}
+            disabled={!name.trim() || !prompt.trim()}
+            className="px-4 py-2 bg-[var(--color-accent)] text-white rounded-lg text-sm disabled:opacity-40"
+          >
+            添加
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -957,68 +1081,188 @@ interface ModulePromptEditModalProps {
   isOpen: boolean
   onClose: () => void
   moduleId: string
+  moduleType: RibbonModuleType
   moduleLabel: string
   currentPrompt: string
-  onSave: (prompt: string) => void
+  currentModel?: string
+  currentLabel?: string
+  onSave: (prompt: string, model?: string, label?: string) => void
   onReset: () => void
 }
 
 function ModulePromptEditModal({
   isOpen,
   onClose,
+  moduleType,
   moduleLabel,
   currentPrompt,
+  currentModel,
+  currentLabel,
   onSave,
   onReset,
 }: ModulePromptEditModalProps) {
+  const { settings } = useSettings()
   const [prompt, setPrompt] = useState(currentPrompt)
+  const [model, setModel] = useState(currentModel || '')
+  const [label, setLabel] = useState(currentLabel || '')
+  const [description, setDescription] = useState('')
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [showDefault, setShowDefault] = useState(false)
+
+  const defaultPrompt = getDefaultPromptForModule(moduleType)
+  const effectivePrompt = prompt || defaultPrompt || ''
 
   useEffect(() => {
     setPrompt(currentPrompt)
-  }, [currentPrompt])
+    setModel(currentModel || '')
+    setLabel(currentLabel || '')
+    setShowDefault(false)
+  }, [currentPrompt, currentModel, currentLabel])
+
+  const handleGenerate = async () => {
+    if (!description.trim() || !settings.apiKey) return
+    setIsGenerating(true)
+    const generated = await generatePromptFromDescription(description, settings)
+    if (generated) {
+      setPrompt(generated)
+      setShowDefault(false)
+    }
+    setIsGenerating(false)
+  }
 
   if (!isOpen) return null
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-[var(--color-surface)] rounded-lg border border-[var(--color-border)] shadow-lg w-full max-w-2xl max-h-[80vh] overflow-hidden">
+      <div className="bg-[var(--color-surface)] rounded-lg border border-[var(--color-border)] shadow-lg w-full max-w-2xl max-h-[85vh] overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
-          <h3 className="font-medium text-[var(--color-ink)]">编辑提示词：{moduleLabel}</h3>
-          <button
-            onClick={onClose}
-            className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]"
-          >
-            ✕
-          </button>
+          <div>
+            <h3 className="font-medium text-[var(--color-ink)]">编辑模块：{moduleLabel}</h3>
+            {defaultPrompt && (
+              <p className="text-xs text-[var(--color-ink-faint)] mt-0.5">
+                {currentPrompt ? '已使用自定义提示词' : '使用默认提示词'}
+              </p>
+            )}
+          </div>
+          <button onClick={onClose} className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]">✕</button>
         </div>
-        <div className="p-4">
-          <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder="输入自定义提示词，留空则使用默认提示词..."
-            className="w-full h-64 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm text-[var(--color-ink)] resize-none focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
-          />
-          <p className="text-xs text-[var(--color-ink-faint)] mt-2">
-            自定义提示词将覆盖该模块的默认行为。清空并保存可恢复默认。
-          </p>
+        <div className="p-4 space-y-4 max-h-[60vh] overflow-y-auto">
+          {/* Module name editing */}
+          <div>
+            <label className="block text-sm text-[var(--color-ink-light)] mb-1">模块名称</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder={moduleLabel}
+                className="flex-1 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm"
+              />
+              {label && label !== moduleLabel && (
+                <button
+                  onClick={() => setLabel('')}
+                  className="text-xs text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] underline"
+                >
+                  恢复默认
+                </button>
+              )}
+            </div>
+            <p className="text-xs text-[var(--color-ink-faint)] mt-1">
+              自定义名称，留空使用默认名称「{moduleLabel}」
+            </p>
+          </div>
+
+          {/* AI Generate from description */}
+          <div>
+            <label className="block text-sm text-[var(--color-ink-light)] mb-1">提示词描述（可选，AI生成）</label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="描述你想要的提示词效果..."
+                className="flex-1 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm"
+              />
+              <button
+                onClick={handleGenerate}
+                disabled={!description.trim() || !settings.apiKey || isGenerating}
+                className="px-3 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5 disabled:opacity-40"
+              >
+                {isGenerating ? '生成中...' : 'AI生成'}
+              </button>
+            </div>
+          </div>
+
+          {/* Model selection */}
+          <div>
+            <label className="block text-sm text-[var(--color-ink-light)] mb-1">使用模型（可选）</label>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={`留空使用主模型 (${settings.model})`}
+                className="flex-1 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm font-mono"
+              />
+              {model && (
+                <button
+                  onClick={() => setModel('')}
+                  className="text-xs text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] underline"
+                >
+                  使用默认
+                </button>
+              )}
+            </div>
+            <p className="text-xs text-[var(--color-ink-faint)] mt-1">
+              为该模块指定专用模型，留空则使用主模型配置
+            </p>
+          </div>
+
+          {/* Prompt content */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-sm text-[var(--color-ink-light)]">提示词内容</label>
+              {defaultPrompt && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowDefault(!showDefault)}
+                    className="text-xs text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] underline"
+                  >
+                    {showDefault ? '隐藏默认提示词' : '查看默认提示词'}
+                  </button>
+                </div>
+              )}
+            </div>
+            <textarea
+              value={prompt}
+              onChange={(e) => { setPrompt(e.target.value); setShowDefault(false); }}
+              placeholder={defaultPrompt ? "输入自定义提示词覆盖默认，或留空使用默认..." : "输入系统提示词..."}
+              className="w-full h-48 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm resize-none focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
+            />
+            {showDefault && defaultPrompt && (
+              <div className="mt-2 p-3 bg-[var(--color-paper-warm)] rounded-lg border border-[var(--color-border)]">
+                <p className="text-xs text-[var(--color-ink-faint)] mb-1">默认提示词：</p>
+                <pre className="text-xs text-[var(--color-ink)] whitespace-pre-wrap">{defaultPrompt}</pre>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex justify-between px-4 py-3 border-t border-[var(--color-border)]">
-          <button
-            onClick={onReset}
-            disabled={!currentPrompt}
-            className="px-4 py-2 text-sm text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] disabled:opacity-30"
-          >
-            恢复默认
-          </button>
-          <div className="flex gap-2">
+          {defaultPrompt ? (
             <button
-              onClick={onClose}
-              className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5"
+              onClick={() => { setPrompt(''); setModel(''); setLabel(''); onReset(); }}
+              disabled={!currentPrompt && !currentModel && !currentLabel}
+              className="px-4 py-2 text-sm text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] disabled:opacity-30"
             >
-              取消
+              恢复默认
             </button>
+          ) : (
+            <div />
+          )}
+          <div className="flex gap-2">
+            <button onClick={onClose} className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5">取消</button>
             <button
-              onClick={() => onSave(prompt.trim())}
+              onClick={() => onSave(prompt.trim(), model.trim() || undefined, label.trim() || undefined)}
               className="px-4 py-2 bg-[var(--color-accent)] text-white rounded-lg text-sm hover:opacity-90"
             >
               保存
