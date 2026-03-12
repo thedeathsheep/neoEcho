@@ -46,12 +46,13 @@ function RibbonModulesEditor({
   const [ragFixedCount, setRagFixedCount] = useState(0)
   const [customPrompts, setCustomPrompts] = useState<{ id: string; name: string }[]>([])
 
-  // Load client-side data after hydration
+  // Load client-side data after hydration; refresh custom list when module count changes (e.g. after adding custom)
+  const moduleCount = ribbonModules.length
   useEffect(() => {
     const activeBase = knowledgeBaseService.getActive()
     setRagFixedCount(Math.min(RAG_PINNED_MAX, activeBase?.mandatoryBooks?.length ?? 0))
     setCustomPrompts(customPromptService.getAll())
-  }, [])
+  }, [moduleCount])
 
   const byId = new Map(ribbonModules.map((m) => [m.id, m]))
 
@@ -63,7 +64,7 @@ function RibbonModulesEditor({
   const custom = customPrompts.map((p) => ({
     id: p.id,
     type: 'custom' as const,
-    label: p.name,
+    label: byId.get(p.id)?.label ?? p.name,
     enabled: byId.get(p.id)?.enabled ?? false,
     pinned: byId.get(p.id)?.pinned ?? false,
   }))
@@ -128,7 +129,10 @@ function RibbonModulesEditor({
           {/* Edit button for AI modules (built-in, custom, and quick) */}
           {mod.type !== 'rag' && (
             <button
-              onClick={() => onEditModulePrompt(mod.id, mod.type, mod.prompt, mod.model, mod.label)}
+              onClick={() => {
+                const currentPrompt = mod.type === 'custom' ? (customPromptService.get(mod.id)?.content ?? '') : mod.prompt
+                onEditModulePrompt(mod.id, mod.type, currentPrompt, mod.model, mod.label)
+              }}
               className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] px-2 py-0.5 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5"
               title="编辑模块"
             >
@@ -351,17 +355,17 @@ export default function SettingsPage() {
   }
 
   const handleAddCustomModule = (name: string, prompt: string) => {
+    const created = customPromptService.create(name, prompt)
     const newModule: RibbonModuleConfig = {
-      id: `custom-${Date.now()}`,
+      id: created.id,
       type: 'custom',
-      label: name,
+      label: created.name,
       enabled: true,
       pinned: false,
-      prompt,
     }
     setRibbonModules(prev => [...prev, newModule])
     setShowAddModule(false)
-    toast.success(`已添加自定义模块「${name}」`)
+    toast.success(`已添加自定义模块「${created.name}」`)
   }
 
   const statusColor: Record<ValidationStatus, string> = {
@@ -959,7 +963,10 @@ export default function SettingsPage() {
           currentModel={editingModuleModel}
           currentLabel={editingModuleLabel}
           onSave={(prompt, model, label) => {
-            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt, model, label } : m))
+            if (editingModuleType === 'custom') {
+              customPromptService.update(editingModuleId, { content: prompt, name: label ?? undefined })
+            }
+            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt: editingModuleType === 'custom' ? undefined : prompt, model, label } : m))
             setEditingModuleId(null)
             toast.success('模块配置已保存')
           }}
@@ -994,20 +1001,32 @@ function AddCustomModuleModal({ isOpen, onClose, onAdd }: AddCustomModuleModalPr
   const [prompt, setPrompt] = useState('')
   const [isGenerating, setIsGenerating] = useState(false)
 
+  const [hasInitialized, setHasInitialized] = useState(false)
+
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && !hasInitialized) {
       setName('')
       setDescription('')
       setPrompt('')
+      setHasInitialized(true)
     }
-  }, [isOpen])
+    if (!isOpen) {
+      setHasInitialized(false)
+    }
+  }, [isOpen, hasInitialized])
 
   const handleGenerate = async () => {
     if (!description.trim() || !settings.apiKey) return
     setIsGenerating(true)
-    const generated = await generatePromptFromDescription(description, settings)
-    if (generated) {
-      setPrompt(generated)
+    try {
+      const generated = await generatePromptFromDescription(description, settings)
+      if (generated) {
+        setPrompt(generated)
+      } else {
+        toast.error('生成失败，请检查 API 配置或稍后重试')
+      }
+    } catch (err) {
+      toast.error('生成失败：' + (err instanceof Error ? err.message : '未知错误'))
     }
     setIsGenerating(false)
   }
@@ -1102,7 +1121,7 @@ function ModulePromptEditModal({
   onReset,
 }: ModulePromptEditModalProps) {
   const { settings } = useSettings()
-  const [prompt, setPrompt] = useState(currentPrompt)
+  const [prompt, setPrompt] = useState(currentPrompt || getDefaultPromptForModule(moduleType) || '')
   const [model, setModel] = useState(currentModel || '')
   const [label, setLabel] = useState(currentLabel || '')
   const [description, setDescription] = useState('')
@@ -1113,19 +1132,26 @@ function ModulePromptEditModal({
   const effectivePrompt = prompt || defaultPrompt || ''
 
   useEffect(() => {
-    setPrompt(currentPrompt)
+    // If no custom prompt, fill with default prompt so user can see it
+    setPrompt(currentPrompt || defaultPrompt || '')
     setModel(currentModel || '')
     setLabel(currentLabel || '')
     setShowDefault(false)
-  }, [currentPrompt, currentModel, currentLabel])
+  }, [currentPrompt, currentModel, currentLabel, defaultPrompt])
 
   const handleGenerate = async () => {
     if (!description.trim() || !settings.apiKey) return
     setIsGenerating(true)
-    const generated = await generatePromptFromDescription(description, settings)
-    if (generated) {
-      setPrompt(generated)
-      setShowDefault(false)
+    try {
+      const generated = await generatePromptFromDescription(description, settings)
+      if (generated) {
+        setPrompt(generated)
+        setShowDefault(false)
+      } else {
+        toast.error('生成失败，请检查 API 配置或稍后重试')
+      }
+    } catch (err) {
+      toast.error('生成失败：' + (err instanceof Error ? err.message : '未知错误'))
     }
     setIsGenerating(false)
   }

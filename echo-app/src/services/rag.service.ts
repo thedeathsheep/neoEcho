@@ -25,9 +25,9 @@ const MAX_RESULTS = 5
 const VECTOR_WEIGHT = 0.7
 const KEYWORD_WEIGHT = 0.3
 /** Minimum hybrid score to consider "strongly relevant"; reserve top-2 slots for these when possible. */
-const STRONG_RELEVANCE_MIN = 0.15
+const STRONG_RELEVANCE_MIN = 0.25
 /** Only add random fill when we have at least one result above this (avoid diluting strong relevance). */
-const RANDOM_FILL_MIN_SCORE = 0.12
+const RANDOM_FILL_MIN_SCORE = 0.20
 
 interface ScoredChunk {
   chunk: KnowledgeChunk
@@ -308,23 +308,28 @@ async function searchRegular(
 
   // Only add random fill when we already have at least one reasonably relevant result (avoid diluting strong relevance)
   const bestScore = topResults.length > 0 ? Math.max(...topResults.map((r) => r.score)) : 0
-  const allowRandomFill = bestScore >= RANDOM_FILL_MIN_SCORE
+  const allowRandomFill = bestScore >= RANDOM_FILL_MIN_SCORE && topResults.length >= 2
   if (topResults.length < MAX_RESULTS && allChunksRes.length > 0 && allowRandomFill) {
+    // Use semantic jitter on remaining chunks instead of pure random
     const selectedIds = new Set(topResults.map((r) => r.chunk.id))
     const availableChunks = allChunksRes.filter(
       (c) => !selectedIds.has(c.id),
     )
-    const shuffled = [...availableChunks].sort(() => Math.random() - 0.5)
+    // Score remaining chunks and apply jitter for variety
+    const remainingScored = await scoreChunks(availableChunks, query, hasEmbeddings)
+    const jitteredRemaining = applySemanticJitter(remainingScored)
+      .filter((s) => s.score > 0.05) // Only consider somewhat relevant remaining chunks
+      .sort((a, b) => b.score - a.score)
     const needed = MAX_RESULTS - topResults.length
-    const randomPicks = shuffled.slice(0, needed)
+    const fillPicks = jitteredRemaining.slice(0, needed)
 
-    const randomScored: ScoredChunk[] = randomPicks.map((chunk) => ({
-      chunk,
-      score: 0.001,
+    const fillScored: ScoredChunk[] = fillPicks.map((item) => ({
+      chunk: item.chunk,
+      score: item.score * 0.5, // Reduce score of filled items to indicate lower confidence
       type: 'lit',
     }))
 
-    topResults.push(...randomScored)
+    topResults.push(...fillScored)
   }
 
   return topResults.map((r) => toEchoItem(r, blockId))

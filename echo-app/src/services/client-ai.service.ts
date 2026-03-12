@@ -184,15 +184,22 @@ export async function generatePromptFromDescription(
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
 ): Promise<string> {
   if (!settings.apiKey || !description.trim()) {
-    return ''
+    throw new Error('API Key 或描述不能为空')
   }
 
-  const systemPrompt = `你是提示词工程师。根据用户的描述，生成一个完整的系统提示词（system prompt）。
-要求：
-- 提示词应明确、具体、可执行
-- 包含角色定义、任务描述、输出规则
-- 使用中文
-- 直接输出提示词内容，不要解释`
+  const systemPrompt = `你是提示词工程师。请根据用户的描述，生成一段「系统提示词」的纯文本内容。
+
+【应用场景】
+这段提示词将用于一个「写作助手织带」：用户写作时，AI 会收到用户当前段落（及可选的知识库片段），并需回复多行短句；每行会作为一条独立内容展示在织带中。因此提示词必须约束 AI：输出多行、每行简短、不编号、不解释。
+
+【输出要求】
+- 只输出可被直接用作系统提示词的纯文本，不要任何前置说明、不要「系统提示词」「角色定义」「任务描述」等小标题或 Markdown 标题（如 #、##）。
+- 内容结构建议：先一句话定义角色与任务（如「你是……。基于用户正在写作的内容，提供/生成……」），再写「规则：」并用短句列出输出格式（如每条不超过多少字、不要编号、直接输出用换行分隔、风格等）。
+- 风格与现有内置提示词一致：简洁、可执行、强调「每条不超过 X 字」「不要编号、不要解释、不要开头语」「直接输出，用换行分隔」。
+- 使用中文。
+
+【重要】
+生成的提示词必须紧密围绕用户的具体需求描述，体现该模块的独特功能（如百科解释、诗歌润色、情节推进等），而不是生成一个通用的写作助手提示词。`
 
   try {
     const res = await fetch(apiUrl(settings.baseUrl, '/chat/completions'), {
@@ -205,22 +212,29 @@ export async function generatePromptFromDescription(
         model: settings.model,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: `请根据以下描述生成系统提示词：\n\n${description.trim()}` },
+          { role: 'user', content: `我需要创建一个自定义模块，具体需求如下：\n\n${description.trim()}\n\n请根据以上描述，生成一段专门的系统提示词。提示词要体现「${description.trim().slice(0, 20)}」这个模块的独特功能，不要生成通用的写作助手提示词。` },
         ],
         temperature: 0.7,
         max_tokens: 512,
       }),
-      signal: AbortSignal.timeout(10000),
     })
 
     if (!res.ok) {
-      throw new Error(`API error: ${res.status}`)
+      const errorText = await res.text().catch(() => '')
+      throw new Error(`API 错误 (${res.status}): ${errorText.slice(0, 200)}`)
     }
 
     const data = (await res.json()) as ChatCompletionResponse
-    return (data.choices?.[0]?.message?.content ?? '').trim()
-  } catch {
-    return ''
+    const content = (data.choices?.[0]?.message?.content ?? '').trim()
+    if (!content) {
+      throw new Error('API 返回空内容')
+    }
+    return content
+  } catch (err) {
+    if (err instanceof Error) {
+      throw err
+    }
+    throw new Error('网络请求失败')
   }
 }
 
@@ -260,6 +274,7 @@ function buildUserPromptByMode(
       : ''
 
   const baseContent = `用户正在写：\n${context.slice(0, 800)}${ragContext}`
+  const contextOnly = `用户正在写：\n${context.slice(0, 800)}`
 
   switch (mode) {
     case 'polish':
@@ -269,8 +284,9 @@ function buildUserPromptByMode(
     case 'quote':
       return `${baseContent}\n\n请推荐与上述主题相关的经典引文或类似表达。`
     case 'custom':
-      // For custom mode, the user prompt is the same as imagery (just context)
-      return baseContent
+      // For custom mode, only use user context without RAG results
+      // Custom modules should generate based on user's current text only
+      return contextOnly
     case 'imagery':
     default:
       return baseContent
