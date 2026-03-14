@@ -8,10 +8,11 @@ import { useSettings, BUILTIN_RIBBON_MODULES } from '@/lib/settings-context'
 import { validateApiKey, getDefaultPromptForModule, generatePromptFromDescription, DEFAULT_SYSTEM_PROMPTS } from '@/services/client-ai.service'
 import { validateEmbeddingApi } from '@/services/embedding.service'
 import { KnowledgeBaseManager } from '@/components/ui/knowledge-base-manager'
+import { CustomPromptManager } from '@/components/ui/custom-prompt-manager'
 import { AboutModal } from '@/components/help/about-modal'
 import { knowledgeBaseService } from '@/services/knowledge-base.service'
 import { customPromptService } from '@/services/custom-prompt.service'
-import type { RibbonModuleConfig, RibbonSlotCount, RibbonModuleType } from '@/types'
+import type { RibbonModuleConfig, RibbonSlotCount, RibbonModuleType, AllocationMode } from '@/types'
 
 const PRESETS = [
   { label: 'DeepSeek', url: 'https://api.deepseek.com', model: 'deepseek-chat' },
@@ -36,11 +37,13 @@ function RibbonModulesEditor({
   ribbonModules,
   setRibbonModules,
   onAddCustomPrompt,
+  onManageCustomPrompts,
   onEditModulePrompt,
 }: {
   ribbonModules: RibbonModuleConfig[]
   setRibbonModules: React.Dispatch<React.SetStateAction<RibbonModuleConfig[]>>
   onAddCustomPrompt: () => void
+  onManageCustomPrompts: () => void
   onEditModulePrompt: (moduleId: string, moduleType: RibbonModuleType, currentPrompt?: string, currentModel?: string, currentLabel?: string) => void
 }) {
   const [ragFixedCount, setRagFixedCount] = useState(0)
@@ -106,13 +109,21 @@ function RibbonModulesEditor({
         <p className="text-xs text-[var(--color-ink-faint)]">
           固定 {totalPinned}/{MAX_PINNED}（共鸣库强制检索在「共鸣库管理」中设置，最多 {RAG_PINNED_MAX} 本）
         </p>
-        <button
-          onClick={onAddCustomPrompt}
-          className="text-xs px-2 py-1 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5 transition-colors flex items-center gap-1"
-        >
-          <span>+</span>
-          <span>添加自定义</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onManageCustomPrompts}
+            className="text-xs px-2 py-1 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5 transition-colors"
+          >
+            管理自定义
+          </button>
+          <button
+            onClick={onAddCustomPrompt}
+            className="text-xs px-2 py-1 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5 transition-colors flex items-center gap-1"
+          >
+            <span>+</span>
+            <span>添加自定义</span>
+          </button>
+        </div>
       </div>
       {displayModules.map((mod) => (
         <div key={mod.id} className="flex items-center gap-3 py-1.5 group">
@@ -178,6 +189,9 @@ export default function SettingsPage() {
   const [ribbonSlotCount, setRibbonSlotCount] = useState<RibbonSlotCount>(
     (settings.ribbonSettings?.slotCount ?? 5) as RibbonSlotCount
   )
+  const [allocationMode, setAllocationMode] = useState<AllocationMode>(
+    (settings.ribbonSettings?.allocationMode ?? 'balanced') as AllocationMode
+  )
   const [ribbonModules, setRibbonModules] = useState<RibbonModuleConfig[]>(() => {
     const mods = settings.ribbonSettings?.modules
     if (mods?.length) return mods
@@ -214,6 +228,7 @@ export default function SettingsPage() {
   useEffect(() => {
     const rs = settings.ribbonSettings
     if (rs?.slotCount) setRibbonSlotCount(Math.min(8, Math.max(5, rs.slotCount)) as RibbonSlotCount)
+    if (rs?.allocationMode) setAllocationMode(rs.allocationMode as AllocationMode)
     if (rs?.modules?.length) setRibbonModules(rs.modules)
   }, [settings.ribbonSettings])
   useEffect(() => {
@@ -234,6 +249,7 @@ export default function SettingsPage() {
   const [availableModels, setAvailableModels] = useState<string[]>([])
   const [showPresets, setShowPresets] = useState(false)
   const [showKbManager, setShowKbManager] = useState(false)
+  const [showPromptManager, setShowPromptManager] = useState(false)
   const [showAddModule, setShowAddModule] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
   const [kbStats, setKbStats] = useState({ baseCount: 0, totalFiles: 0 })
@@ -301,7 +317,18 @@ export default function SettingsPage() {
       ribbonPauseSeconds: Math.min(10, Math.max(1, ribbonPauseSeconds)),
       ribbonSettings: {
         slotCount: ribbonSlotCount,
-        modules: ribbonModules,
+        allocationMode,
+        modules: [
+          ...BUILTIN_RIBBON_MODULES.map((b) => {
+            const saved = ribbonModules.find((m) => m.id === b.id)
+            return {
+              ...b,
+              enabled: saved?.enabled ?? (b.id === 'rag' || b.id === 'ai:imagery'),
+              pinned: saved?.pinned ?? false,
+            }
+          }),
+          ...ribbonModules.filter((m) => m.type === 'custom'),
+        ],
       },
       theme,
       fontSize,
@@ -766,6 +793,29 @@ export default function SettingsPage() {
                 </p>
               </div>
 
+              {/* Allocation mode */}
+              <div>
+                <label className="block text-sm text-[var(--color-ink-light)] mb-2">
+                  内容分配模式
+                </label>
+                <select
+                  value={allocationMode}
+                  onChange={(e) => setAllocationMode(e.target.value as AllocationMode)}
+                  className="w-full px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm"
+                >
+                  <option value="balanced">均衡模式 - 各模块均匀分配</option>
+                  <option value="rag_priority">共鸣优先 - 优先展示知识库内容</option>
+                  <option value="ai_priority">灵感优先 - 优先展示AI生成内容</option>
+                  <option value="custom_priority">自定义优先 - 优先展示自定义模块</option>
+                </select>
+                <p className="text-xs text-[var(--color-ink-faint)] mt-1">
+                  {allocationMode === 'balanced' && '各模块按权重均衡分配'}
+                  {allocationMode === 'rag_priority' && '知识库内容占更多槽位'}
+                  {allocationMode === 'ai_priority' && 'AI 意象、润色等占更多槽位'}
+                  {allocationMode === 'custom_priority' && '自定义模块（如百科）占更多槽位'}
+                </p>
+              </div>
+
               {/* Ribbon content modules */}
               <div>
                 <label className="block text-sm text-[var(--color-ink-light)] mb-2">
@@ -775,6 +825,7 @@ export default function SettingsPage() {
                   ribbonModules={ribbonModules}
                   setRibbonModules={setRibbonModules}
                   onAddCustomPrompt={() => setShowAddModule(true)}
+                  onManageCustomPrompts={() => setShowPromptManager(true)}
                   onEditModulePrompt={(moduleId, moduleType, currentPrompt, currentModel, currentLabel) => {
                     setEditingModuleId(moduleId)
                     setEditingModuleType(moduleType)
@@ -942,6 +993,12 @@ export default function SettingsPage() {
         }}
       />
 
+      {/* Custom Prompt Manager Modal */}
+      <CustomPromptManager
+        isOpen={showPromptManager}
+        onClose={() => setShowPromptManager(false)}
+      />
+
       {/* Add Custom Module Modal */}
       {showAddModule && (
         <AddCustomModuleModal
@@ -962,16 +1019,21 @@ export default function SettingsPage() {
           currentPrompt={editingModulePrompt}
           currentModel={editingModuleModel}
           currentLabel={editingModuleLabel}
-          onSave={(prompt, model, label) => {
+          onSave={(prompt, model, label, customOptions) => {
             if (editingModuleType === 'custom') {
-              customPromptService.update(editingModuleId, { content: prompt, name: label ?? undefined })
+              customPromptService.update(editingModuleId, {
+                content: prompt,
+                name: label ?? undefined,
+                useRag: customOptions?.useRag,
+                ragFallback: customOptions?.ragFallback,
+              })
             }
-            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt: editingModuleType === 'custom' ? undefined : prompt, model, label } : m))
+            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt: editingModuleType === 'custom' ? undefined : prompt, model, label: label || m.label } : m))
             setEditingModuleId(null)
             toast.success('模块配置已保存')
           }}
           onReset={() => {
-            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt: undefined, model: undefined, label: undefined } : m))
+            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt: undefined, model: undefined } : m))
             setEditingModuleId(null)
             toast.success('已恢复默认配置')
           }}
@@ -1105,13 +1167,14 @@ interface ModulePromptEditModalProps {
   currentPrompt: string
   currentModel?: string
   currentLabel?: string
-  onSave: (prompt: string, model?: string, label?: string) => void
+  onSave: (prompt: string, model?: string, label?: string, customOptions?: { useRag?: boolean; ragFallback?: boolean }) => void
   onReset: () => void
 }
 
 function ModulePromptEditModal({
   isOpen,
   onClose,
+  moduleId,
   moduleType,
   moduleLabel,
   currentPrompt,
@@ -1124,6 +1187,8 @@ function ModulePromptEditModal({
   const [prompt, setPrompt] = useState(currentPrompt || getDefaultPromptForModule(moduleType) || '')
   const [model, setModel] = useState(currentModel || '')
   const [label, setLabel] = useState(currentLabel || '')
+  const [useRag, setUseRag] = useState(true)
+  const [ragFallback, setRagFallback] = useState(true)
   const [description, setDescription] = useState('')
   const [isGenerating, setIsGenerating] = useState(false)
   const [showDefault, setShowDefault] = useState(false)
@@ -1136,8 +1201,13 @@ function ModulePromptEditModal({
     setPrompt(currentPrompt || defaultPrompt || '')
     setModel(currentModel || '')
     setLabel(currentLabel || '')
+    if (moduleType === 'custom') {
+      const cp = customPromptService.get(moduleId)
+      setUseRag(cp?.useRag ?? true)
+      setRagFallback(cp?.ragFallback ?? true)
+    }
     setShowDefault(false)
-  }, [currentPrompt, currentModel, currentLabel, defaultPrompt])
+  }, [currentPrompt, currentModel, currentLabel, defaultPrompt, moduleType, moduleId])
 
   const handleGenerate = async () => {
     if (!description.trim() || !settings.apiKey) return
@@ -1219,6 +1289,34 @@ function ModulePromptEditModal({
             </div>
           </div>
 
+          {/* Custom module RAG options */}
+          {moduleType === 'custom' && (
+            <div className="space-y-2 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
+              <p className="text-xs font-medium text-[var(--color-ink-light)]">共鸣库（RAG）配置</p>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={useRag}
+                  onChange={(e) => setUseRag(e.target.checked)}
+                  className="rounded border-[var(--color-border)]"
+                />
+                <span className="text-sm text-[var(--color-ink)]">使用共鸣库上下文（RAG）</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={ragFallback}
+                  onChange={(e) => setRagFallback(e.target.checked)}
+                  className="rounded border-[var(--color-border)]"
+                />
+                <span className="text-sm text-[var(--color-ink)]">RAG 失败时自动降级为仅用户上下文</span>
+              </label>
+              <p className="text-xs text-[var(--color-ink-faint)]">
+                开启后，自定义模块可结合知识库内容生成；失败时自动降级。
+              </p>
+            </div>
+          )}
+
           {/* Model selection */}
           <div>
             <label className="block text-sm text-[var(--color-ink-light)] mb-1">使用模型（可选）</label>
@@ -1288,7 +1386,12 @@ function ModulePromptEditModal({
           <div className="flex gap-2">
             <button onClick={onClose} className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5">取消</button>
             <button
-              onClick={() => onSave(prompt.trim(), model.trim() || undefined, label.trim() || undefined)}
+              onClick={() => onSave(
+                prompt.trim(),
+                model.trim() || undefined,
+                label.trim() || undefined,
+                moduleType === 'custom' ? { useRag, ragFallback } : undefined
+              )}
               className="px-4 py-2 bg-[var(--color-accent)] text-white rounded-lg text-sm hover:opacity-90"
             >
               保存

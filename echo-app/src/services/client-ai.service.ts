@@ -1,5 +1,6 @@
 import type { Settings } from '@/lib/settings-context'
 import { BUILTIN_RIBBON_MODULES } from '@/lib/settings-context'
+import { devLog } from '@/lib/dev-log'
 import type { AIMode, EchoItem } from '@/types'
 import type { RibbonModuleType } from '@/types'
 import { customPromptService } from './custom-prompt.service'
@@ -16,7 +17,7 @@ interface ChatMessage {
 }
 
 interface ChatCompletionResponse {
-  choices: { message: { content: string } }[]
+  choices: { message: { content: string }; finish_reason?: string }[]
 }
 
 interface ModelsResponse {
@@ -145,6 +146,7 @@ function getSystemPromptForRibbonModule(type: RibbonModuleType, id: string, cust
     // For custom type, try to get from service
     const prompt = customPromptService.get(id)
     if (prompt?.content?.trim()) return prompt.content.trim()
+    devLog.push('ai', 'custom prompt not found, using fallback', { moduleId: id })
     return DEFAULT_SYSTEM_PROMPTS.imagery
   }
   if (type.startsWith('ai:')) {
@@ -431,7 +433,7 @@ export async function generateEchoes(
         model: settings.model,
         messages,
         temperature: 0.85,
-        max_tokens: 256,
+        max_tokens: 512,
       }),
       signal: AbortSignal.timeout(15000),
     })
@@ -463,12 +465,21 @@ export async function generateEchoes(
   }
 
   const data = (await res.json()) as ChatCompletionResponse
-  const text = data.choices?.[0]?.message?.content ?? ''
+  const choice = data.choices?.[0]
+  const text = choice?.message?.content ?? ''
+  const finishReason = choice?.finish_reason
+
+  devLog.push('ai', 'generateEchoes response', {
+    textLen: text.length,
+    finishReason: finishReason ?? '(unknown)',
+    truncated: finishReason === 'length',
+    preview: text.slice(0, 120) + (text.length > 120 ? '…' : ''),
+  })
 
   return text
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => line.length > 0 && line.length <= 60)
+    .filter((line) => line.length > 0)
     .slice(0, 5)
     .map((content, i) => ({
       id: `ai-${Date.now()}-${i}`,
@@ -480,9 +491,16 @@ export async function generateEchoes(
     }))
 }
 
+export interface ModuleGenerationResult {
+  items: EchoItem[]
+  usedRag: boolean
+  error?: string
+}
+
 /**
  * Generate echoes for a single ribbon module (AI mode or custom prompt by id).
  * Used when multiple modules are enabled; each module can be called independently.
+ * Supports RAG fallback for custom modules.
  */
 export async function generateEchoesForModule(
   context: string,
@@ -490,20 +508,32 @@ export async function generateEchoesForModule(
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
   module: { type: RibbonModuleType; id: string; prompt?: string; model?: string },
   blockId?: string,
-): Promise<EchoItem[]> {
+  options?: { allowRagFallback?: boolean }
+): Promise<ModuleGenerationResult> {
   // Support: ai:*, custom, quick types
   const isSupported = module.type.startsWith('ai:') || module.type === 'custom' || module.type === 'quick'
   if (!settings.apiKey || !isSupported) {
-    return []
+    return { items: [], usedRag: false, error: '模块不支持或未配置API' }
   }
 
   const systemPrompt = getSystemPromptForRibbonModule(module.type, module.id, module.prompt)
   const mode = ribbonTypeToAIMode(module.type)
 
-  // Quick modules don't use RAG results - they respond directly to context
-  const userContent = module.type === 'quick'
-    ? `当前文本：\n${context}\n\n请根据以上文本，直接给出你的回应。`
-    : buildUserPromptByMode(context, ragResults, mode)
+  // For custom modules, try RAG context first if allowed
+  let userContent: string
+  let usedRag = false
+
+  if (module.type === 'custom' && options?.allowRagFallback && ragResults.length > 0) {
+    // Try with RAG context first
+    userContent = buildUserPromptByMode(context, ragResults, mode)
+    usedRag = true
+  } else if (module.type === 'quick') {
+    // Quick modules don't use RAG results
+    userContent = `当前文本：\n${context}\n\n请根据以上文本，直接给出你的回应。`
+  } else {
+    // Default: use buildUserPromptByMode (which handles custom mode as contextOnly)
+    userContent = buildUserPromptByMode(context, ragResults, mode)
+  }
 
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
@@ -525,7 +555,7 @@ export async function generateEchoesForModule(
         model: modelToUse,
         messages,
         temperature: 0.85,
-        max_tokens: 256,
+        max_tokens: 512,
       }),
       signal: AbortSignal.timeout(15000),
     })
@@ -557,14 +587,30 @@ export async function generateEchoesForModule(
   }
 
   const data = (await res.json()) as ChatCompletionResponse
-  const text = data.choices?.[0]?.message?.content ?? ''
-  // Map module type to display label
+  const choice = data.choices?.[0]
+  const text = choice?.message?.content ?? ''
+  const finishReason = choice?.finish_reason
   const sourceLabel = getModuleDisplayLabel(module.type, module.id)
 
-  return text
+  devLog.push('ai', `generateEchoesForModule [${sourceLabel}] response`, {
+    moduleId: module.id,
+    textLen: text.length,
+    finishReason: finishReason ?? '(unknown)',
+    truncated: finishReason === 'length',
+    preview: text.slice(0, 120) + (text.length > 120 ? '…' : ''),
+  })
+
+  if (text.length === 0) {
+    devLog.push('ai', `generateEchoesForModule [${sourceLabel}] empty API response`, {
+      moduleId: module.id,
+    })
+    return { items: [], usedRag, error: 'API返回空内容' }
+  }
+
+  const items = text
     .split('\n')
     .map((line) => line.trim())
-    .filter((line) => line.length > 0 && line.length <= 60)
+    .filter((line) => line.length > 0)
     .slice(0, 5)
     .map((content, i) => ({
       id: `ai-${module.id}-${Date.now()}-${i}`,
@@ -574,4 +620,6 @@ export async function generateEchoesForModule(
       blockId,
       createdAt: new Date().toISOString(),
     }))
+
+  return { items, usedRag }
 }

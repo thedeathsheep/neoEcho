@@ -3,7 +3,22 @@
 import { useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 
+import { sanitizeForDisplay } from '@/lib/utils/text-sanitize'
 import type { EchoItem } from '@/types'
+
+/** Sanitize, then add paragraph breaks. Group 2–3 sentences per paragraph to avoid choppy single-sentence lines. */
+function segmentForDisplay(text: string): string {
+  const sanitized = sanitizeForDisplay(text ?? '')
+  if (!sanitized.trim()) return ''
+  const sentences = sanitized.split(/(?<=[。！？!?])\s*/).filter(Boolean)
+  if (sentences.length <= 1) return sanitized
+  const groupSize = 2
+  const paragraphs: string[] = []
+  for (let i = 0; i < sentences.length; i += groupSize) {
+    paragraphs.push(sentences.slice(i, i + groupSize).join('').trim())
+  }
+  return paragraphs.join('\n\n').trim()
+}
 
 function getSourceLabel(source?: string): string {
   if (source && source.trim()) return source
@@ -72,13 +87,13 @@ export function RibbonDetailPanel({ item, onClose }: RibbonDetailPanelProps) {
                   </p>
                 )}
                 <p className="font-serif text-sm leading-relaxed text-[var(--color-ink)] whitespace-pre-wrap">
-                  {item.originalText ?? item.content}
+                  {segmentForDisplay(item.originalText ?? item.content ?? '')}
                 </p>
               </>
             ) : (
               <>
                 <p className="font-serif text-sm leading-relaxed text-[var(--color-ink)] whitespace-pre-wrap">
-                  {item.content}
+                  {segmentForDisplay(item.content ?? '')}
                 </p>
                 <p className="mt-3 text-[10px] text-[var(--color-ink-faint)]">
                   可点击织带单元复制到剪贴板

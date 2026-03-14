@@ -23,6 +23,8 @@ const DEFAULT_PROMPTS: CustomPrompt[] = [
 - 风格：开放、启发性、富有想象力`,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    useRag: true,
+    ragFallback: true,
   },
   {
     id: 'default-poetry',
@@ -37,6 +39,8 @@ const DEFAULT_PROMPTS: CustomPrompt[] = [
 - 风格：诗意、凝练、富有音乐感`,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    useRag: true,
+    ragFallback: true,
   },
   {
     id: 'default-academic',
@@ -51,6 +55,8 @@ const DEFAULT_PROMPTS: CustomPrompt[] = [
 - 风格：严谨、专业、客观`,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    useRag: true,
+    ragFallback: true,
   },
 ]
 
@@ -163,6 +169,8 @@ export function createPrompt(
   name: string,
   content: string,
   description?: string,
+  useRag?: boolean,
+  ragFallback?: boolean,
 ): CustomPrompt {
   const now = new Date().toISOString()
   const newPrompt: CustomPrompt = {
@@ -172,6 +180,8 @@ export function createPrompt(
     description: description?.trim(),
     createdAt: now,
     updatedAt: now,
+    useRag: useRag ?? true,
+    ragFallback: ragFallback ?? true,
   }
 
   const prompts = loadPrompts()

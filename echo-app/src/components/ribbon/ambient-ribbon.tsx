@@ -4,13 +4,16 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 
-import type { EchoItem } from '@/types'
+import { sanitizeForDisplay } from '@/lib/utils/text-sanitize'
+import type { EchoItem, PlaceholderItem } from '@/types'
+import { PlaceholderCard } from '@/components/ribbon/placeholder-card'
 
 /** Pause threshold in ms before ribbon updates (shown in hint). */
 export const RIBBON_PAUSE_SEC = 2
 
 interface SemanticCloudProps {
   echoes: EchoItem[]
+  placeholders?: PlaceholderItem[]
   batchKey: number
   /** Number of ribbon slots (5–8). Layout adapts to avoid overlap. */
   slotCount?: 5 | 6 | 7 | 8
@@ -22,6 +25,7 @@ interface SemanticCloudProps {
   /** Currently focused/selected echo for right-panel detail. Alt+Q cycles through cells. */
   selectedEchoId?: string | null
   onRibbonSelect?: (item: EchoItem | null) => void
+  onPlaceholderRetry?: (moduleId: string) => void
 }
 
 function getEmptyMessage(hasApiKey: boolean, hasKnowledge: boolean): string {
@@ -116,7 +120,7 @@ function EchoFragment({
       className="ribbon-float shrink-0 w-full min-w-0 max-w-[min(100%,14rem)] pointer-events-auto"
       style={{ animationDelay: `${index * 0.15}s` }}
       initial={{ opacity: 0, y: 14 }}
-      animate={{ opacity: 0.55 }}
+      animate={{ opacity: 0.95 }}
       exit={{ opacity: 0, x: -60, transition: { duration: 0.35, ease: 'easeIn' } }}
       transition={{ opacity: { duration: 0.6, delay: index * 0.08, ease: FLOAT_EASE } }}
     >
@@ -135,7 +139,7 @@ function EchoFragment({
         <p
           className={`font-serif tracking-wide leading-relaxed text-[var(--color-ink)] ${contentFontSize(len)} line-clamp-3`}
         >
-          {item.content}
+          {sanitizeForDisplay(item.content ?? '')}
         </p>
         <span
           className={`block mt-0.5 text-[10px] tracking-widest truncate ${
@@ -149,10 +153,37 @@ function EchoFragment({
   )
 }
 
+function PlaceholderFragment({
+  item,
+  index,
+  onRetry,
+}: {
+  item: PlaceholderItem
+  index: number
+  onRetry?: (moduleId: string) => void
+}) {
+  return (
+    <motion.div
+      className="shrink-0 w-full min-w-0 max-w-[min(100%,14rem)] pointer-events-auto"
+      style={{ animationDelay: `${index * 0.15}s` }}
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 0.8 }}
+      exit={{ opacity: 0, x: -60, transition: { duration: 0.35, ease: 'easeIn' } }}
+      transition={{ opacity: { duration: 0.6, delay: index * 0.08, ease: FLOAT_EASE } }}
+    >
+      <PlaceholderCard
+        item={item}
+        onRetry={onRetry ? () => onRetry(item.moduleId) : undefined}
+      />
+    </motion.div>
+  )
+}
+
 type IndicatorState = 'idle' | 'working' | 'done'
 
 export function AmbientRibbon({
   echoes,
+  placeholders = [],
   batchKey,
   slotCount = 5,
   hasApiKey = false,
@@ -161,8 +192,9 @@ export function AmbientRibbon({
   onCardClick,
   selectedEchoId = null,
   onRibbonSelect,
+  onPlaceholderRetry,
 }: SemanticCloudProps) {
-  const hasContent = echoes.length > 0
+  const hasContent = echoes.length > 0 || placeholders.length > 0
   const [indicatorState, setIndicatorState] = useState<IndicatorState>('idle')
   const prevGeneratingRef = useRef(isGenerating)
   const ribbonCellsContainerRef = useRef<HTMLDivElement>(null)
@@ -221,7 +253,7 @@ export function AmbientRibbon({
   }, [slotCount, onRibbonSelect])
 
   return (
-    <div className="absolute inset-x-0 top-16 h-56 z-30 pointer-events-none overflow-hidden max-w-3xl mx-auto left-0 right-0">
+    <div className="relative w-full h-56 z-30 pointer-events-none overflow-hidden max-w-3xl mx-auto">
       <style dangerouslySetInnerHTML={{ __html: ribbonFloatStyle }} />
       <AnimatePresence mode="sync">
         {/* State 1: empty hint */}
@@ -237,7 +269,7 @@ export function AmbientRibbon({
           </motion.p>
         )}
 
-        {/* State 2: current batch of echoes (keep showing while generating to avoid flash) */}
+        {/* State 2: current batch of echoes and placeholders (keep showing while generating to avoid flash) */}
         {hasContent && (
           <motion.div
             ref={ribbonCellsContainerRef}
@@ -247,6 +279,7 @@ export function AmbientRibbon({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0, x: -80, transition: { duration: 0.4, ease: 'easeIn' } }}
           >
+            {/* Echoes first */}
             {echoes.slice(0, slotCount).map((echo, i) => (
               <EchoFragment
                 key={echo.id}
@@ -255,6 +288,15 @@ export function AmbientRibbon({
                 onCardClick={onCardClick}
                 selectedEchoId={selectedEchoId}
                 onRibbonSelect={onRibbonSelect}
+              />
+            ))}
+            {/* Then placeholders */}
+            {placeholders.slice(0, slotCount - Math.min(echoes.length, slotCount)).map((ph, i) => (
+              <PlaceholderFragment
+                key={ph.id}
+                item={ph}
+                index={Math.min(echoes.length, slotCount) + i}
+                onRetry={onPlaceholderRetry}
               />
             ))}
           </motion.div>

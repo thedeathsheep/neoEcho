@@ -19,10 +19,28 @@ export interface RibbonModuleConfig {
 
 export type RibbonSlotCount = 5 | 6 | 7 | 8
 
+/** Ribbon content allocation mode */
+export type AllocationMode = 'balanced' | 'rag_priority' | 'ai_priority' | 'custom_priority'
+
 export interface RibbonSettings {
   slotCount: RibbonSlotCount
   modules: RibbonModuleConfig[]
+  allocationMode?: AllocationMode  // Defaults to 'balanced' if not set
 }
+
+/** Placeholder item for failed or loading modules */
+export interface PlaceholderItem {
+  id: string
+  type: 'placeholder'
+  moduleId: string
+  moduleLabel: string
+  status: 'loading' | 'error' | 'empty'
+  message?: string
+  retryable: boolean
+}
+
+/** Unified ribbon item type */
+export type RibbonItem = EchoItem | PlaceholderItem
 
 export interface AIConfig {
   provider: AIProvider
@@ -76,4 +94,8 @@ export interface CustomPrompt {
   description?: string
   createdAt: string
   updatedAt: string
+  /** Whether to use RAG context for this custom module. Defaults to true. */
+  useRag?: boolean
+  /** Whether to fallback to context-only if RAG fails. Defaults to true. */
+  ragFallback?: boolean
 }

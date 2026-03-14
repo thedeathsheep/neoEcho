@@ -25,7 +25,7 @@ import { DocumentPanel } from '@/components/ui/document-panel'
 import { documentStorage } from '@/lib/document-storage'
 import { devLog } from '@/lib/dev-log'
 import { flowHistory } from '@/lib/flow-history'
-import { useSettings } from '@/lib/settings-context'
+import { useSettings, BUILTIN_RIBBON_MODULES } from '@/lib/settings-context'
 import { debounce } from '@/lib/utils/time'
 import { generateId } from '@/lib/utils/crypto'
 import { useHeartbeat } from '@/hooks/use-heartbeat'
@@ -35,6 +35,7 @@ import {
   generateEchoesForModule,
   expandQueryForRAG,
   filterRibbonCandidates,
+  type ModuleGenerationResult,
 } from '@/services/client-ai.service'
 import {
   knowledgeBaseService,
@@ -42,7 +43,8 @@ import {
   getChunksByBase,
   type KnowledgeBase,
 } from '@/services/knowledge-base.service'
-import type { Document, EchoItem, RibbonModuleConfig } from '@/types'
+import { allocateSlots, type ModuleResult } from '@/lib/ribbon-allocator'
+import type { Document, EchoItem, RibbonModuleConfig, PlaceholderItem } from '@/types'
 
 const AUTO_SAVE_MS = 2000
 const ERROR_THROTTLE_MS = 60_000
@@ -58,12 +60,16 @@ export default function Home() {
   const [content, setContent] = useState('')
   const [echoes, setEchoes] = useState<EchoItem[]>([])
   const [displayEchoes, setDisplayEchoes] = useState<EchoItem[]>([])
+  const [displayPlaceholders, setDisplayPlaceholders] = useState<PlaceholderItem[]>([])
   const [batchKey, setBatchKey] = useState(0)
   const [currentBlockId, setCurrentBlockId] = useState<string | null>(null)
   const [aiStatus, setAiStatus] = useState<AiStatus>('idle')
   const [isRibbonRefreshing, setIsRibbonRefreshing] = useState(false)
   const [selectedRibbonEcho, setSelectedRibbonEcho] = useState<EchoItem | null>(null)
   const selectedRibbonEchoRef = useRef<EchoItem | null>(null)
+
+  // Request ID for concurrency control
+  const refreshRequestIdRef = useRef<string>('')
 
   useEffect(() => {
     selectedRibbonEchoRef.current = selectedRibbonEcho
@@ -74,6 +80,7 @@ export default function Home() {
   const lastProcessedTextRef = useRef('')
   const lastRefreshedTextRef = useRef('')
   const lastErrorTimeRef = useRef<Record<string, number>>({})
+  const isRibbonRefreshingRef = useRef(false)
 
   const hasApiKey = !!settings.apiKey
   const [hasKnowledge, setHasKnowledge] = useState(false)
@@ -119,9 +126,15 @@ export default function Home() {
   }, [])
 
   const handlePause = useCallback(async (text: string) => {
+    const requestId = generateId()
+    refreshRequestIdRef.current = requestId
     lastTextRef.current = text
     devLog.push('ribbon', 'handlePause invoked', { textLen: text.length })
 
+    if (isRibbonRefreshingRef.current) {
+      devLog.push('ribbon', 'handlePause skipped: refresh in progress', {})
+      return
+    }
     if (selectedRibbonEchoRef.current !== null) {
       devLog.push('ribbon', 'handlePause skipped: detail panel open (ribbon frozen)', {})
       return
@@ -134,13 +147,26 @@ export default function Home() {
       devLog.push('ribbon', 'handlePause early exit: same as lastRefreshed', {})
       return
     }
+    isRibbonRefreshingRef.current = true
     lastProcessedTextRef.current = text
     setIsRibbonRefreshing(true)
 
     const bid = currentBlockIdRef.current ?? undefined
     const ribbonSettings = settings.ribbonSettings ?? { slotCount: 5, modules: [] }
     const slotCount = Math.min(8, Math.max(5, ribbonSettings.slotCount)) as 5 | 6 | 7 | 8
-    const enabledModules = (ribbonSettings.modules ?? []).filter((m: RibbonModuleConfig) => m.enabled)
+    const allocationMode = (ribbonSettings.allocationMode ?? 'balanced') as import('@/types').AllocationMode
+    const savedModules = ribbonSettings.modules ?? []
+    const isCurrentRequest = () => refreshRequestIdRef.current === requestId
+    const byId = new Map(savedModules.map((m: RibbonModuleConfig) => [m.id, m]))
+    const allModules: RibbonModuleConfig[] = [
+      ...BUILTIN_RIBBON_MODULES.map((b) => ({
+        ...b,
+        enabled: byId.get(b.id)?.enabled ?? (b.id === 'rag' || b.id === 'ai:imagery'),
+        pinned: byId.get(b.id)?.pinned ?? false,
+      })),
+      ...savedModules.filter((m: RibbonModuleConfig) => m.type === 'custom'),
+    ]
+    const enabledModules = allModules.filter((m: RibbonModuleConfig) => m.enabled)
 
     const shuffle = <T,>(arr: T[]): T[] => {
       const out = [...arr]
@@ -173,28 +199,130 @@ export default function Home() {
         chunksPromise,
       ])
 
+      if (!isCurrentRequest()) return
+
       devLog.push('ribbon', 'expand + chunks (parallel)', { ms: Date.now() - tParallel })
       devLog.push('ribbon', 'RAG query', {
         queryLen: searchQuery.length,
         semanticExpansion: settings.semanticExpansion,
       })
 
-      let ragResults: EchoItem[] = []
-      if (ragModule?.enabled && activeBase?.id) {
-        ragResults = await ragService.search(
-          searchQuery,
-          {
-            knowledgeBaseId: activeBase.id,
-            mandatoryBookIds,
-            mandatoryMaxSlots,
-          },
-          bid,
-          preloadedChunks.length > 0 ? preloadedChunks : undefined,
+      const quickModules = enabledModules.filter((m: RibbonModuleConfig) => m.type === 'quick')
+      const customModules = enabledModules.filter((m: RibbonModuleConfig) => m.type === 'custom')
+      const aiModulesNeedRag = enabledModules.filter(
+        (m: RibbonModuleConfig) =>
+          (m.type || m.id || '').startsWith('ai:') && m.type !== 'rag' && m.type !== 'quick',
+      )
+      devLog.push('ribbon', 'module counts', {
+        enabledTotal: enabledModules.length,
+        aiNeedRag: aiModulesNeedRag.length,
+        aiIds: aiModulesNeedRag.map((m) => m.id),
+        hasApiKey: !!hasApiKey,
+      })
+      const aiResultsByModuleId: Record<string, EchoItem[]> = {}
+      const quickResultsByModuleId: Record<string, EchoItem[]> = {}
+      const customResultsByModuleId: Record<string, EchoItem[]> = {}
+
+      // RAG, Quick, and Custom modules in parallel (Quick/Custom do not need RAG results)
+      const ragPromise: Promise<EchoItem[]> =
+        ragModule?.enabled && activeBase?.id
+          ? ragService
+              .search(
+                searchQuery,
+                {
+                  knowledgeBaseId: activeBase.id,
+                  mandatoryBookIds,
+                  mandatoryMaxSlots,
+                },
+                bid,
+                preloadedChunks.length > 0 ? preloadedChunks : undefined,
+              )
+              .then(async (results) => {
+                if (settings.ribbonAiFilter && hasApiKey && results.length > 0) {
+                  return filterRibbonCandidates(text, results, settings)
+                }
+                return results
+              })
+          : Promise.resolve([])
+
+      const noRagPromises: Array<Promise<{ mod: RibbonModuleConfig; items: EchoItem[] }>> = []
+      if (hasApiKey && quickModules.length > 0) {
+        noRagPromises.push(
+          ...quickModules.map(async (mod) => {
+            try {
+              const result = await generateEchoesForModule(
+                text,
+                [],
+                { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model },
+                { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
+                bid,
+              )
+              return { mod, items: result.items }
+            } catch (err) {
+              return { mod, items: [], error: (err as Error).message }
+            }
+          }),
         )
-        if (settings.ribbonAiFilter && hasApiKey && ragResults.length > 0) {
-          ragResults = await filterRibbonCandidates(text, ragResults, settings)
-        }
+      }
+      if (hasApiKey && customModules.length > 0) {
+        noRagPromises.push(
+          ...customModules.map(async (mod) => {
+            try {
+              const result = await generateEchoesForModule(
+                text,
+                [], // Custom runs in parallel with RAG, no ragResults yet
+                { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model },
+                { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
+                bid,
+              )
+              if (result.items.length === 0) {
+                devLog.push('ribbon', 'custom module returned empty', {
+                  moduleId: mod.id,
+                  label: mod.label,
+                })
+              }
+              return { mod, items: result.items }
+            } catch (err) {
+              const errMsg = (err as Error).message
+              devLog.push('ribbon', 'custom module error', {
+                moduleId: mod.id,
+                label: mod.label,
+                error: errMsg,
+              })
+              return { mod, items: [], error: errMsg }
+            }
+          }),
+        )
+      }
+
+      if (hasApiKey && (ragModule?.enabled || noRagPromises.length > 0)) {
+        setAiStatus('loading')
+        devLog.push('ribbon', 'RAG + Quick + Custom (parallel)', {
+          rag: !!ragModule?.enabled,
+          quickCount: quickModules.length,
+          customCount: customModules.length,
+        })
+      }
+
+      const [ragResults, ...noRagResultsList] = await Promise.all([ragPromise, ...noRagPromises])
+
+      if (!isCurrentRequest()) return
+
+      if (ragModule?.enabled && activeBase?.id) {
         devLog.push('ribbon', 'RAG done', { count: ragResults.length })
+      }
+      noRagResultsList.forEach(({ mod, items }) => {
+        if (mod.type === 'quick') {
+          quickResultsByModuleId[mod.id] = items
+        } else {
+          customResultsByModuleId[mod.id] = items
+        }
+      })
+      if (noRagResultsList.length > 0) {
+        devLog.push('ribbon', 'Quick + Custom done', {
+          quick: Object.fromEntries(Object.entries(quickResultsByModuleId).map(([k, v]) => [k, v.length])),
+          custom: Object.fromEntries(Object.entries(customResultsByModuleId).map(([k, v]) => [k, v.length])),
+        })
       }
 
       const ragFixedCount =
@@ -202,64 +330,31 @@ export default function Home() {
           ? Math.min(mandatoryMaxSlots, mandatoryBookIds.length)
           : 0
       const fixedPool: EchoItem[] = ragResults.slice(0, ragFixedCount)
+      noRagResultsList.forEach(({ mod, items }) => {
+        if (mod.pinned && items.length > 0) {
+          fixedPool.push(items[0])
+        }
+      })
 
-      // Separate quick modules (no RAG wait) from other AI modules
-      const quickModules = enabledModules.filter((m: RibbonModuleConfig) => m.type === 'quick')
-      const aiModules = enabledModules.filter((m: RibbonModuleConfig) => m.type !== 'rag' && m.type !== 'quick' && (m.type.startsWith('ai:') || m.type === 'custom'))
-      const aiResultsByModuleId: Record<string, EchoItem[]> = {}
-      const quickResultsByModuleId: Record<string, EchoItem[]> = {}
-
-      // Start quick modules immediately (don't wait for RAG)
-      if (hasApiKey && quickModules.length > 0) {
+      let aiResultsList: ModuleResult[] = []
+      if (hasApiKey && aiModulesNeedRag.length > 0) {
         setAiStatus('loading')
-        devLog.push('ribbon', 'Quick modules start (parallel with RAG)', { count: quickModules.length })
-        const quickPromises = quickModules.map(async (mod) => {
+        devLog.push('ribbon', 'AI modules (need RAG) start', { count: aiModulesNeedRag.length })
+        const aiPromises = aiModulesNeedRag.map(async (mod) => {
           try {
-            const items = await generateEchoesForModule(
-              text,
-              [], // Quick modules don't use RAG results
-              { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model },
-              { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
-              bid,
-            )
-            return { mod, items }
-          } catch {
-            return { mod, items: [] as EchoItem[] }
-          }
-        })
-        const quickResultsList = await Promise.all(quickPromises)
-        quickResultsList.forEach(({ mod, items }) => {
-          quickResultsByModuleId[mod.id] = items
-          if (mod.pinned && items.length > 0) {
-            fixedPool.push(items[0])
-          }
-        })
-        devLog.push('ribbon', 'Quick modules done', {
-          byModule: Object.fromEntries(
-            Object.entries(quickResultsByModuleId).map(([k, v]) => [k, v.length]),
-          ),
-        })
-      }
-
-      if (hasApiKey && aiModules.length > 0) {
-        setAiStatus('loading')
-        devLog.push('ribbon', 'AI modules start', { count: aiModules.length })
-        // Parallel: one key can handle concurrent requests; run all AI modules at once
-        const aiPromises = aiModules.map(async (mod) => {
-          try {
-            const items = await generateEchoesForModule(
+            const result = await generateEchoesForModule(
               text,
               ragResults,
               { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model },
               { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
               bid,
             )
-            return { mod, items }
-          } catch {
-            return { mod, items: [] as EchoItem[] }
+            return { mod, items: result.items }
+          } catch (err) {
+            return { mod, items: [], error: (err as Error).message }
           }
         })
-        const aiResultsList = await Promise.all(aiPromises)
+        aiResultsList = await Promise.all(aiPromises)
         aiResultsList.forEach(({ mod, items }) => {
           aiResultsByModuleId[mod.id] = items
           if (mod.pinned && items.length > 0) {
@@ -274,11 +369,32 @@ export default function Home() {
         })
       }
 
-      const allResults: EchoItem[] = [...ragResults, ...Object.values(aiResultsByModuleId).flat(), ...Object.values(quickResultsByModuleId).flat()]
-      const fixedIds = new Set(fixedPool.map((x) => x.id))
-      const randomPool = allResults.filter((x) => !fixedIds.has(x.id))
-      const shuffled = shuffle(randomPool)
-      const final = [...fixedPool, ...shuffled.slice(0, slotCount - fixedPool.length)].slice(0, slotCount)
+      if (!isCurrentRequest()) return
+
+      // Build module results for allocator (include RAG non-fixed, Quick, Custom, AI)
+      const ragNonFixed = ragResults.slice(ragFixedCount)
+      const allModuleResults: ModuleResult[] = [
+        ...(ragModule?.enabled && ragNonFixed.length > 0
+          ? [{ mod: ragModule, items: ragNonFixed } as ModuleResult]
+          : []),
+        ...noRagResultsList.map((r) => ({ mod: r.mod, items: r.items, error: (r as { error?: string }).error })),
+        ...aiResultsList.map((r) => ({ mod: r.mod, items: r.items, error: (r as { error?: string }).error })),
+      ]
+
+      const { items: allocatedItems, placeholders } = allocateSlots(
+        allModuleResults,
+        slotCount,
+        allocationMode,
+        fixedPool,
+      )
+
+      const final = allocatedItems
+      devLog.push('ribbon', 'allocation', {
+        mode: allocationMode,
+        fixedCount: fixedPool.length,
+        allocatedCount: allocatedItems.length,
+        placeholderCount: placeholders.length,
+      })
 
       const applyRibbonUpdate = (nextList: EchoItem[]) => {
         const ids = new Set(nextList.map((e) => e.id))
@@ -295,6 +411,7 @@ export default function Home() {
         })
         setEchoes((prev) => flowHistory.append(documentId, final, prev))
         setDisplayEchoes(final)
+        setDisplayPlaceholders(placeholders)
         setBatchKey((k) => k + 1)
         lastRefreshedTextRef.current = text
         applyRibbonUpdate(final)
@@ -306,12 +423,14 @@ export default function Home() {
         })
         setEchoes((prev) => flowHistory.append(documentId, fallback, prev))
         setDisplayEchoes(fallback)
+        setDisplayPlaceholders([])
         setBatchKey((k) => k + 1)
         lastRefreshedTextRef.current = text
         applyRibbonUpdate(fallback)
       }
     } catch (err) {
       if (hasApiKey) setAiStatus('error')
+      setDisplayPlaceholders([])
       const msg = (err as Error).message
       if (msg === 'API_KEY_INVALID') {
         throttledErrorToast('auth', 'API Key 无效或已过期，请在设置中更新')
@@ -335,9 +454,14 @@ export default function Home() {
         throttledErrorToast('generic', msg.length > 60 ? 'AI 灵感生成失败，请检查设置中的 Base URL 与模型名' : msg)
       }
     } finally {
+      isRibbonRefreshingRef.current = false
       setIsRibbonRefreshing(false)
     }
   }, [documentId, hasApiKey, settings, throttledErrorToast])
+
+  const handlePlaceholderRetry = useCallback(() => {
+    handlePause(lastTextRef.current)
+  }, [handlePause])
 
   const pauseMs = Math.min(10, Math.max(1, settings.ribbonPauseSeconds ?? 2)) * 1000
   const { beat } = useHeartbeat({
@@ -502,6 +626,7 @@ export default function Home() {
     lastProcessedTextRef.current = ''
     lastRefreshedTextRef.current = ''
     setDisplayEchoes([])
+    setDisplayPlaceholders([])
     setBatchKey(0)
   }, [])
 
@@ -514,7 +639,7 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen relative bg-[var(--color-paper)]">
+    <div className="h-screen flex flex-col overflow-hidden bg-[var(--color-paper)]">
       <DocumentPanel
         currentDocumentId={documentId}
         onOpenDocument={handleOpenDocument}
@@ -525,20 +650,24 @@ export default function Home() {
         <DevPanel />
       </div>
 
-      <AmbientRibbon
-        echoes={content.trim().length === 0 ? [] : displayEchoes}
-        batchKey={batchKey}
-        slotCount={(Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as 5 | 6 | 7 | 8)}
-        currentBlockId={currentBlockId}
-        hasApiKey={hasApiKey}
-        hasKnowledge={hasKnowledge}
-        isGenerating={isRibbonRefreshing}
-        selectedEchoId={selectedRibbonEcho?.id ?? null}
-        onRibbonSelect={(item) => {
-          selectedRibbonEchoRef.current = item
-          setSelectedRibbonEcho(item)
-        }}
-      />
+      <div className="flex-shrink-0 pt-16 bg-[var(--color-paper)]">
+        <AmbientRibbon
+          echoes={content.trim().length === 0 ? [] : displayEchoes}
+          placeholders={displayPlaceholders}
+          batchKey={batchKey}
+          slotCount={(Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as 5 | 6 | 7 | 8)}
+          currentBlockId={currentBlockId}
+          hasApiKey={hasApiKey}
+          hasKnowledge={hasKnowledge}
+          isGenerating={isRibbonRefreshing}
+          selectedEchoId={selectedRibbonEcho?.id ?? null}
+          onRibbonSelect={(item) => {
+            selectedRibbonEchoRef.current = item
+            setSelectedRibbonEcho(item)
+          }}
+          onPlaceholderRetry={handlePlaceholderRetry}
+        />
+      </div>
 
       <RibbonDetailPanel
         item={selectedRibbonEcho}
@@ -548,27 +677,29 @@ export default function Home() {
         }}
       />
 
-      <main className="relative z-40 flex flex-col items-center pt-80 pb-32">
-        <div className="w-full max-w-3xl px-8 mb-12">
-          <input
-            type="text"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="无题"
-            className="bg-transparent border-none outline-none text-2xl font-bold placeholder:opacity-20 w-full mb-4 text-[var(--color-ink)]"
-            aria-label="Document title"
-          />
-          <div className="w-12 h-0.5 bg-[var(--color-border)]" />
-        </div>
+      <main className="flex-1 min-h-0 overflow-y-auto">
+        <div className="flex flex-col items-center pt-8 pb-32">
+          <div className="w-full max-w-3xl px-8 mb-12">
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="无题"
+              className="bg-transparent border-none outline-none text-2xl font-bold placeholder:opacity-20 w-full mb-4 text-[var(--color-ink)]"
+              aria-label="Document title"
+            />
+            <div className="w-12 h-0.5 bg-[var(--color-border)]" />
+          </div>
 
-        <EchoEditor
-          key={documentId}
-          initialContent={content}
-          onUpdate={handleEditorUpdate}
-          onContentChange={handleContentChange}
-          onSave={handleManualSave}
-          onInspire={handleInspire}
-        />
+          <EchoEditor
+            key={documentId}
+            initialContent={content}
+            onUpdate={handleEditorUpdate}
+            onContentChange={handleContentChange}
+            onSave={handleManualSave}
+            onInspire={handleInspire}
+          />
+        </div>
       </main>
     </div>
   )

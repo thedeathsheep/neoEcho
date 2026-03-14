@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 
 import { devLog } from '@/lib/dev-log'
 
@@ -13,6 +13,15 @@ export function useHeartbeat({ pauseThreshold = 500, onPause }: HeartbeatOptions
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textRef = useRef('')
   const beatCountRef = useRef(0)
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+    }
+  }, [])
 
   const beat = useCallback(
     (text: string) => {

@@ -9,6 +9,7 @@ import {
 } from 'react'
 
 import type { RibbonModuleConfig, RibbonSettings } from '@/types'
+import { customPromptService } from '@/services/custom-prompt.service'
 
 export interface Settings {
   apiKey: string
@@ -46,6 +47,7 @@ export const BUILTIN_RIBBON_MODULES: Omit<RibbonModuleConfig, 'enabled' | 'pinne
 function getDefaultRibbonSettings(): RibbonSettings {
   return {
     slotCount: 5,
+    allocationMode: 'balanced',
     modules: BUILTIN_RIBBON_MODULES.map((m) => ({
       ...m,
       enabled: m.id === 'rag' || m.id === 'ai:imagery',
@@ -95,6 +97,40 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
         const merged = { ...DEFAULT_SETTINGS, ...parsed }
         if (!merged.ribbonSettings?.slotCount || !Array.isArray(merged.ribbonSettings?.modules)) {
           merged.ribbonSettings = getDefaultRibbonSettings()
+        } else {
+          const saved = merged.ribbonSettings.modules as RibbonModuleConfig[]
+          const byId = new Map(saved.map((m) => [m.id, m]))
+          const builtinAiIds = BUILTIN_RIBBON_MODULES.filter((b) => (b.type || b.id || '').startsWith('ai:')).map((b) => b.id)
+          const allAiDisabled = builtinAiIds.length > 0 && builtinAiIds.every((id) => byId.get(id)?.enabled === false)
+          const savedCustom = saved.filter((m) => m.type === 'custom')
+          const savedCustomIds = new Set(savedCustom.map((m) => m.id))
+          // Merge custom prompts from customPromptService that are not yet in ribbon (e.g. 百科)
+          const customPrompts = customPromptService.getAll()
+          const newCustom = customPrompts
+            .filter((p) => !savedCustomIds.has(p.id))
+            .map((p) => ({
+              id: p.id,
+              type: 'custom' as const,
+              label: p.name,
+              enabled: false,
+              pinned: false,
+            }))
+          const normalized = [
+            ...BUILTIN_RIBBON_MODULES.map((b) => {
+              let enabled = byId.get(b.id)?.enabled ?? (b.id === 'rag' || b.id === 'ai:imagery')
+              if (allAiDisabled && (b.type || b.id || '').startsWith('ai:') && b.id === 'ai:imagery') {
+                enabled = true
+              }
+              return { ...b, enabled, pinned: byId.get(b.id)?.pinned ?? false }
+            }),
+            ...savedCustom,
+            ...newCustom,
+          ]
+          merged.ribbonSettings = {
+            ...merged.ribbonSettings,
+            modules: normalized,
+            allocationMode: merged.ribbonSettings.allocationMode ?? 'balanced',
+          }
         }
         setSettings(merged)
       }
