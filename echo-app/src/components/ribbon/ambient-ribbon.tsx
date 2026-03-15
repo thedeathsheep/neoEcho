@@ -6,7 +6,6 @@ import { toast } from 'sonner'
 
 import { sanitizeForDisplay } from '@/lib/utils/text-sanitize'
 import type { EchoItem, PlaceholderItem } from '@/types'
-import { PlaceholderCard } from '@/components/ribbon/placeholder-card'
 
 /** Pause threshold in ms before ribbon updates (shown in hint). */
 export const RIBBON_PAUSE_SEC = 2
@@ -41,6 +40,12 @@ function getEmptyMessage(hasApiKey: boolean, hasKnowledge: boolean): string {
   return '开始写作，灵感随时在这里...'
 }
 
+
+function getSourceLabel(source?: string): string {
+  if (source && source.trim()) return source
+  return 'Echo'
+}
+
 function contentFontSize(len: number): string {
   if (len <= 6) return 'text-lg'
   if (len <= 12) return 'text-base'
@@ -48,27 +53,23 @@ function contentFontSize(len: number): string {
   return 'text-xs'
 }
 
-function getSourceLabel(source?: string): string {
-  if (source && source.trim()) return source
-  return 'Echo'
-}
-
-function getCardVariant(item: EchoItem): 'ai' | 'knowledge' {
-  return item.source === 'AI' ? 'ai' : 'knowledge'
-}
-
-// No fixed slot positions: layout is auto flow (flex-wrap) to avoid overlap for any slot count and content length.
-
-const FLOAT_EASE = [0.37, 0, 0.2, 1] as const
-
-// CSS keyframe for smooth 60fps float; avoids JS-driven animation jank.
 const ribbonFloatStyle = `
   @keyframes ribbon-float {
     0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-4px); }
+    50% { transform: translateY(-2px); }
   }
   .ribbon-float { animation: ribbon-float 4s ease-in-out infinite; will-change: transform; }
 ` as const
+
+/** Staggered offsets for cloud-like layout (错落有致) */
+const CLOUD_OFFSETS: [number, number][] = [
+  [0, 0],
+  [6, -5],
+  [-5, 6],
+  [5, 5],
+  [-6, 3],
+  [4, -6],
+]
 
 function EchoFragment({
   item,
@@ -83,22 +84,24 @@ function EchoFragment({
   selectedEchoId?: string | null
   onRibbonSelect?: (item: EchoItem | null) => void
 }) {
-  const len = item.content.length
-  const variant = getCardVariant(item)
-  const isAi = variant === 'ai'
+  const fullText = item.originalText ?? item.content ?? ''
+  // Truncate at 80 chars
+  const displayText = fullText.length > 80 ? fullText.slice(0, 80) + '…' : fullText
+  const len = displayText.length
+  const isAi = item.source === 'AI'
   const isSelected = selectedEchoId === item.id
 
   const handleClick = useCallback(() => {
     if (onCardClick) {
       onCardClick(item)
     } else {
-      navigator.clipboard.writeText(item.content).then(
+      navigator.clipboard.writeText(fullText).then(
         () => toast.success('已复制到剪贴板'),
         () => toast.error('复制失败'),
       )
     }
     onRibbonSelect?.(item)
-  }, [item, onCardClick, onRibbonSelect])
+  }, [item, fullText, onCardClick, onRibbonSelect])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -106,7 +109,6 @@ function EchoFragment({
         e.preventDefault()
         handleClick()
       }
-      // Arrow L/R handled by container so we don't need to pass refs
     },
     [handleClick],
   )
@@ -115,41 +117,44 @@ function EchoFragment({
     onRibbonSelect?.(item)
   }, [item, onRibbonSelect])
 
+  const [ox, oy] = CLOUD_OFFSETS[index % CLOUD_OFFSETS.length]
   return (
-    <motion.div
-      className="ribbon-float shrink-0 w-full min-w-0 max-w-[min(100%,14rem)] pointer-events-auto"
-      style={{ animationDelay: `${index * 0.15}s` }}
-      initial={{ opacity: 0, y: 14 }}
-      animate={{ opacity: 0.95 }}
-      exit={{ opacity: 0, x: -60, transition: { duration: 0.35, ease: 'easeIn' } }}
-      transition={{ opacity: { duration: 0.6, delay: index * 0.08, ease: FLOAT_EASE } }}
+    <div
+      className="shrink-0 w-fit max-w-[10rem] pointer-events-auto"
+      style={{ transform: `translate(${ox}px, ${oy}px)` }}
     >
-      <div
-        role="button"
-        tabIndex={-1}
-        data-ribbon-cell
-        aria-label={`织带 ${index + 1}`}
-        onClick={handleClick}
-        onFocus={handleFocus}
-        onKeyDown={handleKeyDown}
-        className={`relative px-2 py-1.5 rounded-lg cursor-pointer transition-all duration-150 hover:ring-1 hover:ring-[var(--color-border)] hover:scale-[1.02] h-full min-h-[3.5rem] ${
-          isSelected ? 'ring-2 ring-[var(--color-accent)]' : ''
-        }`}
+      <motion.div
+        style={{ animationDelay: `${index * 0.15}s` }}
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 0.95 }}
+        exit={{ opacity: 0, transition: { duration: 0.35, ease: 'easeIn' } }}
+        transition={{ opacity: { duration: 0.6, delay: index * 0.08, ease: [0.37, 0, 0.2, 1] } }}
       >
-        <p
-          className={`font-serif tracking-wide leading-relaxed text-[var(--color-ink)] ${contentFontSize(len)} line-clamp-3`}
-        >
-          {sanitizeForDisplay(item.content ?? '')}
-        </p>
-        <span
-          className={`block mt-0.5 text-[10px] tracking-widest truncate ${
-            isAi ? 'text-[var(--color-accent)]' : 'text-[var(--color-ink-faint)]'
+        <div
+          role="button"
+          tabIndex={-1}
+          data-ribbon-cell
+          aria-label={`织带 ${index + 1}`}
+          onClick={handleClick}
+          onFocus={handleFocus}
+          onKeyDown={handleKeyDown}
+          className={`ribbon-float relative px-2 py-1.5 rounded cursor-pointer transition-all duration-150 hover:ring-1 hover:ring-[var(--color-border)] text-left inline-block ${
+            isSelected ? 'ring-2 ring-[var(--color-accent)]' : ''
           }`}
         >
-          {isAi ? getSourceLabel(item.source) : `来自 ${getSourceLabel(item.source)}`}
-        </span>
-      </div>
-    </motion.div>
+          <p className={`font-serif tracking-wide leading-relaxed text-[var(--color-ink)] ${contentFontSize(len)} max-w-[10rem]`}>
+            {sanitizeForDisplay(displayText)}
+          </p>
+          <span
+            className={`text-[9px] tracking-wider ${
+              isAi ? 'text-[var(--color-accent)]/70' : 'text-[var(--color-ink-faint)]'
+            }`}
+          >
+            {isAi ? getSourceLabel(item.source) : `来自 ${getSourceLabel(item.source)}`}
+          </span>
+        </div>
+      </motion.div>
+    </div>
   )
 }
 
@@ -162,20 +167,37 @@ function PlaceholderFragment({
   index: number
   onRetry?: (moduleId: string) => void
 }) {
+  const [ox, oy] = CLOUD_OFFSETS[index % CLOUD_OFFSETS.length]
   return (
-    <motion.div
-      className="shrink-0 w-full min-w-0 max-w-[min(100%,14rem)] pointer-events-auto"
-      style={{ animationDelay: `${index * 0.15}s` }}
-      initial={{ opacity: 0, y: 14 }}
-      animate={{ opacity: 0.8 }}
-      exit={{ opacity: 0, x: -60, transition: { duration: 0.35, ease: 'easeIn' } }}
-      transition={{ opacity: { duration: 0.6, delay: index * 0.08, ease: FLOAT_EASE } }}
+    <div
+      className="shrink-0 w-fit max-w-[10rem] pointer-events-auto"
+      style={{ transform: `translate(${ox}px, ${oy}px)` }}
     >
-      <PlaceholderCard
-        item={item}
-        onRetry={onRetry ? () => onRetry(item.moduleId) : undefined}
-      />
-    </motion.div>
+      <motion.div
+        style={{ animationDelay: `${index * 0.15}s` }}
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 0.8 }}
+        exit={{ opacity: 0, transition: { duration: 0.35, ease: 'easeIn' } }}
+        transition={{ opacity: { duration: 0.6, delay: index * 0.08, ease: [0.37, 0, 0.2, 1] } }}
+      >
+        <div className="ribbon-float relative px-2 py-1.5 rounded text-left inline-block bg-[var(--color-surface)]/50 border border-[var(--color-border)]/50">
+          <p className="text-sm leading-snug font-serif text-[var(--color-ink-faint)]">
+            {item.status === 'loading' ? '加载中...' : item.status === 'error' ? '生成失败' : '无内容'}
+          </p>
+          <span className="text-[9px] tracking-wider text-[var(--color-ink-faint)]/50">
+            {item.moduleLabel}
+          </span>
+          {item.retryable && onRetry && item.status === 'error' && (
+            <button
+              onClick={() => onRetry(item.moduleId)}
+              className="ml-2 text-[9px] text-[var(--color-accent)] hover:underline"
+            >
+              重试
+            </button>
+          )}
+        </div>
+      </motion.div>
+    </div>
   )
 }
 
@@ -253,86 +275,75 @@ export function AmbientRibbon({
   }, [slotCount, onRibbonSelect])
 
   return (
-    <div className="relative w-full h-56 z-30 pointer-events-none overflow-hidden max-w-3xl mx-auto">
+    <div className="relative w-full h-full min-h-0 py-3 px-6 z-30 flex flex-col justify-center">
       <style dangerouslySetInnerHTML={{ __html: ribbonFloatStyle }} />
-      <AnimatePresence mode="sync">
-        {/* State 1: empty hint */}
-        {!hasContent && !isGenerating && (
-          <motion.p
-            key="empty-hint"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 0.35 }}
-            exit={{ opacity: 0, transition: { duration: 0.2 } }}
-            className="absolute top-1/3 left-1/2 -translate-x-1/2 text-center text-sm italic tracking-wide text-[var(--color-ink-faint)] whitespace-nowrap"
-          >
-            {getEmptyMessage(hasApiKey, hasKnowledge)}
-          </motion.p>
-        )}
+      <div className="relative w-full max-w-6xl mx-auto">
+        <AnimatePresence mode="sync">
+          {/* State 1: empty hint */}
+          {!hasContent && !isGenerating && (
+            <motion.p
+              key="empty-hint"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 0.35 }}
+              exit={{ opacity: 0, transition: { duration: 0.2 } }}
+              className="text-center text-sm italic tracking-wide text-[var(--color-ink-faint)]"
+            >
+              {getEmptyMessage(hasApiKey, hasKnowledge)}
+            </motion.p>
+          )}
 
-        {/* State 2: current batch of echoes and placeholders (keep showing while generating to avoid flash) */}
-        {hasContent && (
-          <motion.div
-            ref={ribbonCellsContainerRef}
-            key={`batch-${batchKey}`}
-            className="absolute inset-0 flex flex-wrap content-start gap-x-3 gap-y-2 justify-center items-start px-2 py-1"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0, x: -80, transition: { duration: 0.4, ease: 'easeIn' } }}
-          >
-            {/* Echoes first */}
-            {echoes.slice(0, slotCount).map((echo, i) => (
-              <EchoFragment
-                key={echo.id}
-                item={echo}
-                index={i}
-                onCardClick={onCardClick}
-                selectedEchoId={selectedEchoId}
-                onRibbonSelect={onRibbonSelect}
-              />
-            ))}
-            {/* Then placeholders */}
-            {placeholders.slice(0, slotCount - Math.min(echoes.length, slotCount)).map((ph, i) => (
-              <PlaceholderFragment
-                key={ph.id}
-                item={ph}
-                index={Math.min(echoes.length, slotCount) + i}
-                onRetry={onPlaceholderRetry}
-              />
-            ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
+          {/* State 2: flex-wrap with staggered offsets for cloud effect */}
+          {hasContent && (
+            <motion.div
+              ref={ribbonCellsContainerRef}
+              key={`batch-${batchKey}`}
+              className="flex flex-wrap gap-x-4 gap-y-3 justify-center items-start w-full max-w-6xl mx-auto"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, transition: { duration: 0.4, ease: 'easeIn' } }}
+            >
+              {echoes.slice(0, slotCount).map((echo, i) => (
+                <EchoFragment
+                  key={echo.id}
+                  item={echo}
+                  index={i}
+                  onCardClick={onCardClick}
+                  selectedEchoId={selectedEchoId}
+                  onRibbonSelect={onRibbonSelect}
+                />
+              ))}
+              {placeholders.slice(0, slotCount - Math.min(echoes.length, slotCount)).map((ph, i) => (
+                <PlaceholderFragment
+                  key={ph.id}
+                  item={ph}
+                  index={Math.min(echoes.length, slotCount) + i}
+                  onRetry={onPlaceholderRetry}
+                />
+              ))}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-      {/* Always-visible status indicator (idle / working / done) */}
-      <div
-        className="absolute bottom-4 right-2 w-2.5 h-2 rounded-full pointer-events-none flex items-center justify-center"
-        aria-hidden
-      >
-        {indicatorState === 'idle' && (
-          <motion.span
-            initial={{ opacity: 0.5 }}
-            animate={{ opacity: 0.5 }}
-            className="w-full h-full rounded-full bg-[var(--color-ink-faint)]"
-          />
-        )}
-        {indicatorState === 'working' && (
-          <motion.span
-            animate={{ opacity: [0.5, 1, 0.5] }}
-            transition={{ repeat: Infinity, duration: 1.2, ease: 'easeInOut' }}
-            className="w-full h-full rounded-full bg-[var(--color-accent)]"
-          />
-        )}
-        {indicatorState === 'done' && (
-          <motion.span
-            initial={{ opacity: 1 }}
-            animate={{ opacity: 1 }}
-            className="w-full h-full rounded-full bg-[var(--color-accent)]"
-          />
-        )}
+        {/* Status indicator: bottom-right */}
+        <div
+          className="absolute bottom-2 right-2 w-2 h-2 rounded-full pointer-events-none"
+          aria-hidden
+        >
+          {indicatorState === 'idle' && (
+            <span className="block w-full h-full rounded-full bg-[var(--color-ink-faint)] opacity-50" />
+          )}
+          {indicatorState === 'working' && (
+            <motion.span
+              animate={{ opacity: [0.5, 1, 0.5] }}
+              transition={{ repeat: Infinity, duration: 1.2, ease: 'easeInOut' }}
+              className="block w-full h-full rounded-full bg-[var(--color-accent)]"
+            />
+          )}
+          {indicatorState === 'done' && (
+            <span className="block w-full h-full rounded-full bg-[var(--color-accent)]" />
+          )}
+        </div>
       </div>
-
-      {/* bottom fade mask */}
-      <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-b from-transparent to-[var(--color-paper)] pointer-events-none" />
     </div>
   )
 }

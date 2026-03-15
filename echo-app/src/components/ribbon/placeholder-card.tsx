@@ -35,7 +35,7 @@ export function PlaceholderCard({ item, onRetry }: PlaceholderCardProps) {
     <div
       className={`
         relative flex flex-col items-center justify-center
-        h-full min-h-[120px] px-4 py-3
+        min-h-[100px] w-full px-4 py-3
         rounded-lg border border-dashed
         ${config.bgClass} ${config.borderClass}
         transition-all duration-200

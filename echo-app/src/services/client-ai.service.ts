@@ -1,6 +1,7 @@
 import type { Settings } from '@/lib/settings-context'
 import { BUILTIN_RIBBON_MODULES } from '@/lib/settings-context'
 import { devLog } from '@/lib/dev-log'
+import { sanitizeForDisplay } from '@/lib/utils/text-sanitize'
 import type { AIMode, EchoItem } from '@/types'
 import type { RibbonModuleType } from '@/types'
 import { customPromptService } from './custom-prompt.service'
@@ -265,18 +266,76 @@ function getModuleDisplayLabel(type: RibbonModuleType, id: string): string {
   return 'AI 生成'
 }
 
+const RAG_CORRECT_SYSTEM = `你是文本校对助手。知识库检索片段可能含OCR错误、断行异常、断头标点、多余空格等。请校对为符合正常文本表现的版本，保持原意，仅修正格式和明显错误。
+输出格式：每段一行，以 --- 分隔，顺序与输入一致。不要添加任何解释或编号。`
+
+/**
+ * Correct RAG snippets via AI so they conform to normal text presentation.
+ * Returns original items on API failure.
+ */
+export async function correctRagResultsForContext(
+  items: EchoItem[],
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model' | 'ribbonFilterModel'>,
+): Promise<EchoItem[]> {
+  if (!settings.apiKey || items.length === 0) return items
+
+  const model = (settings.ribbonFilterModel || '').trim() || settings.model
+  const input = items
+    .map((r) => (r.originalText ?? r.content ?? '').trim().slice(0, 300))
+    .join('\n---\n')
+  const userContent = `请校对以下片段：\n\n${input}`
+
+  try {
+    const res = await fetch(apiUrl(settings.baseUrl, '/chat/completions'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${settings.apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: RAG_CORRECT_SYSTEM },
+          { role: 'user', content: userContent },
+        ],
+        temperature: 0.2,
+        max_tokens: 1024,
+      }),
+      signal: AbortSignal.timeout(15000),
+    })
+    if (!res.ok) return items
+
+    const data = (await res.json()) as ChatCompletionResponse
+    const raw = (data.choices?.[0]?.message?.content ?? '').trim()
+    const corrected = raw.split(/\s*---\s*/).map((s) => s.trim()).filter(Boolean)
+
+    if (corrected.length !== items.length) return items
+
+    return items.map((r, i) => ({
+      ...r,
+      content: corrected[i].slice(0, 200),
+      originalText: corrected[i],
+    }))
+  } catch {
+    return items
+  }
+}
+
 function buildUserPromptByMode(
   context: string,
   ragResults: EchoItem[],
   mode: AIMode,
 ): string {
+  const userContext = (context.slice(0, 800) || '').trim()
   const ragContext =
     ragResults.length > 0
-      ? `\n\n相关知识库片段：\n${ragResults.map((r) => `- ${r.content}`).join('\n')}`
+      ? `\n\n相关知识库片段：\n${ragResults
+          .map((r) => `- ${(r.originalText ?? r.content ?? '').trim()}`)
+          .join('\n')}`
       : ''
 
-  const baseContent = `用户正在写：\n${context.slice(0, 800)}${ragContext}`
-  const contextOnly = `用户正在写：\n${context.slice(0, 800)}`
+  const baseContent = `用户正在写：\n${userContext}${ragContext}`
+  const contextOnly = `用户正在写：\n${userContext}`
 
   switch (mode) {
     case 'polish':
@@ -286,9 +345,8 @@ function buildUserPromptByMode(
     case 'quote':
       return `${baseContent}\n\n请推荐与上述主题相关的经典引文或类似表达。`
     case 'custom':
-      // For custom mode, only use user context without RAG results
-      // Custom modules should generate based on user's current text only
-      return contextOnly
+      // Custom with RAG fallback uses baseContent; otherwise context only
+      return ragResults.length > 0 ? baseContent : contextOnly
     case 'imagery':
     default:
       return baseContent
@@ -435,11 +493,11 @@ export async function generateEchoes(
         temperature: 0.85,
         max_tokens: 512,
       }),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(25000),
     })
   } catch (err) {
-    if (err instanceof DOMException && err.name === 'TimeoutError') {
-      throw new Error('NETWORK_TIMEOUT')
+    if (err instanceof DOMException && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      throw new Error('请求超时，请重试')
     }
     if (err instanceof TypeError) {
       throw new Error('NETWORK_ERROR')
@@ -505,7 +563,7 @@ export interface ModuleGenerationResult {
 export async function generateEchoesForModule(
   context: string,
   ragResults: EchoItem[],
-  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model' | 'ribbonFilterModel'>,
   module: { type: RibbonModuleType; id: string; prompt?: string; model?: string },
   blockId?: string,
   options?: { allowRagFallback?: boolean }
@@ -522,16 +580,17 @@ export async function generateEchoesForModule(
   // For custom modules, try RAG context first if allowed
   let userContent: string
   let usedRag = false
+  let ragForPrompt = ragResults
 
-  if (module.type === 'custom' && options?.allowRagFallback && ragResults.length > 0) {
-    // Try with RAG context first
-    userContent = buildUserPromptByMode(context, ragResults, mode)
-    usedRag = true
-  } else if (module.type === 'quick') {
+  if (module.type === 'quick') {
     // Quick modules don't use RAG results
     userContent = `当前文本：\n${context}\n\n请根据以上文本，直接给出你的回应。`
+  } else if (ragResults.length > 0 && (module.type.startsWith('ai:') || (module.type === 'custom' && options?.allowRagFallback))) {
+    // AI modules and custom (with RAG fallback) use RAG; correct snippets before use
+    usedRag = true
+    ragForPrompt = await correctRagResultsForContext(ragResults, settings)
+    userContent = buildUserPromptByMode(context, ragForPrompt, mode)
   } else {
-    // Default: use buildUserPromptByMode (which handles custom mode as contextOnly)
     userContent = buildUserPromptByMode(context, ragResults, mode)
   }
 
@@ -542,6 +601,13 @@ export async function generateEchoesForModule(
 
   // Use module-specific model if set, otherwise fall back to global model
   const modelToUse = module.model?.trim() || settings.model
+
+  const sourceLabel = getModuleDisplayLabel(module.type, module.id)
+  const fetchStart = Date.now()
+
+  // #region agent log
+  fetch('http://127.0.0.1:7776/ingest/bd75bf12-cc2c-45c2-9d32-c1c193905a25',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'626617'},body:JSON.stringify({sessionId:'626617',location:'client-ai.service.ts:fetchStart',message:'generateEchoesForModule fetch start',data:{moduleId:module.id,sourceLabel,model:modelToUse},hypothesisId:'A',timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
 
   let res: Response
   try {
@@ -557,11 +623,15 @@ export async function generateEchoesForModule(
         temperature: 0.85,
         max_tokens: 512,
       }),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(25000),
     })
   } catch (err) {
-    if (err instanceof DOMException && err.name === 'TimeoutError') {
-      throw new Error('NETWORK_TIMEOUT')
+    // #region agent log
+    const elapsed = Date.now() - fetchStart
+    fetch('http://127.0.0.1:7776/ingest/bd75bf12-cc2c-45c2-9d32-c1c193905a25',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'626617'},body:JSON.stringify({sessionId:'626617',location:'client-ai.service.ts:catch',message:'generateEchoesForModule fetch error',data:{moduleId:module.id,sourceLabel,errName:(err as Error)?.name,errMessage:(err as Error)?.message,elapsedMs:elapsed,isDOMException:err instanceof DOMException},hypothesisId:'B',timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    if (err instanceof DOMException && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      throw new Error('请求超时，请重试')
     }
     if (err instanceof TypeError) {
       throw new Error('NETWORK_ERROR')
@@ -590,7 +660,6 @@ export async function generateEchoesForModule(
   const choice = data.choices?.[0]
   const text = choice?.message?.content ?? ''
   const finishReason = choice?.finish_reason
-  const sourceLabel = getModuleDisplayLabel(module.type, module.id)
 
   devLog.push('ai', `generateEchoesForModule [${sourceLabel}] response`, {
     moduleId: module.id,

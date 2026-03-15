@@ -89,7 +89,7 @@ export function EchoEditor({
   }, [editor, onContentChange])
 
   return (
-    <div className="w-full max-w-3xl mx-auto px-8 min-h-[50vh]">
+    <div className="w-full max-w-2xl mx-auto min-h-[50vh]">
       <EditorContent editor={editor} />
     </div>
   )

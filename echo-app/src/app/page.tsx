@@ -253,7 +253,7 @@ export default function Home() {
               const result = await generateEchoesForModule(
                 text,
                 [],
-                { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model },
+                { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
                 { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
                 bid,
               )
@@ -271,7 +271,7 @@ export default function Home() {
               const result = await generateEchoesForModule(
                 text,
                 [], // Custom runs in parallel with RAG, no ragResults yet
-                { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model },
+                { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
                 { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
                 bid,
               )
@@ -345,7 +345,7 @@ export default function Home() {
             const result = await generateEchoesForModule(
               text,
               ragResults,
-              { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model },
+              { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
               { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
               bid,
             )
@@ -474,7 +474,10 @@ export default function Home() {
       lastTextRef.current = text
       currentBlockIdRef.current = blockId
       setCurrentBlockId(blockId)
-      beat(text)
+      // Don't start pause timer for empty/minimal content; avoids ribbon firing on new doc
+      if (text.trim().length >= 2) {
+        beat(text)
+      }
     },
     [beat],
   )
@@ -650,44 +653,37 @@ export default function Home() {
         <DevPanel />
       </div>
 
-      <div className="flex-shrink-0 pt-16 bg-[var(--color-paper)]">
-        <AmbientRibbon
-          echoes={content.trim().length === 0 ? [] : displayEchoes}
-          placeholders={displayPlaceholders}
-          batchKey={batchKey}
-          slotCount={(Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as 5 | 6 | 7 | 8)}
-          currentBlockId={currentBlockId}
-          hasApiKey={hasApiKey}
-          hasKnowledge={hasKnowledge}
-          isGenerating={isRibbonRefreshing}
-          selectedEchoId={selectedRibbonEcho?.id ?? null}
-          onRibbonSelect={(item) => {
-            selectedRibbonEchoRef.current = item
-            setSelectedRibbonEcho(item)
-          }}
-          onPlaceholderRetry={handlePlaceholderRetry}
-        />
-      </div>
+      <div className="flex-1 flex flex-col min-h-0">
+        <div className="flex-shrink-0 h-[20rem] min-h-[20rem] border-b border-[var(--color-border)] bg-[var(--color-paper)] overflow-hidden">
+          <AmbientRibbon
+            echoes={content.trim().length === 0 ? [] : displayEchoes}
+            placeholders={displayPlaceholders}
+            batchKey={batchKey}
+            slotCount={(Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as 5 | 6 | 7 | 8)}
+            currentBlockId={currentBlockId}
+            hasApiKey={hasApiKey}
+            hasKnowledge={hasKnowledge}
+            isGenerating={isRibbonRefreshing}
+            selectedEchoId={selectedRibbonEcho?.id ?? null}
+            onRibbonSelect={(item) => {
+              selectedRibbonEchoRef.current = item
+              setSelectedRibbonEcho(item)
+            }}
+            onPlaceholderRetry={handlePlaceholderRetry}
+          />
+        </div>
 
-      <RibbonDetailPanel
-        item={selectedRibbonEcho}
-        onClose={() => {
-          selectedRibbonEchoRef.current = null
-          setSelectedRibbonEcho(null)
-        }}
-      />
-
-      <main className="flex-1 min-h-0 overflow-y-auto">
-        <div className="flex flex-col items-center pt-8 pb-32">
-          <div className="w-full max-w-3xl px-8 mb-12">
-            <input
-              type="text"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="无题"
-              className="bg-transparent border-none outline-none text-2xl font-bold placeholder:opacity-20 w-full mb-4 text-[var(--color-ink)]"
-              aria-label="Document title"
-            />
+        <main className="flex-1 min-h-0 overflow-y-auto">
+          <div className="flex flex-col items-center pt-8 pb-32 px-6">
+            <div className="w-full max-w-2xl mb-12">
+              <input
+                type="text"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="无题"
+                className="bg-transparent border-none outline-none text-2xl font-bold placeholder:opacity-20 w-full mb-4 text-[var(--color-ink)]"
+                aria-label="Document title"
+              />
             <div className="w-12 h-0.5 bg-[var(--color-border)]" />
           </div>
 
@@ -698,9 +694,18 @@ export default function Home() {
             onContentChange={handleContentChange}
             onSave={handleManualSave}
             onInspire={handleInspire}
-          />
-        </div>
-      </main>
+            />
+          </div>
+        </main>
+      </div>
+
+      <RibbonDetailPanel
+        item={selectedRibbonEcho}
+        onClose={() => {
+          selectedRibbonEchoRef.current = null
+          setSelectedRibbonEcho(null)
+        }}
+      />
     </div>
   )
 }
