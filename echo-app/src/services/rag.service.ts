@@ -1,5 +1,5 @@
 import { createLogger } from '@/lib/logger'
-import type { EchoItem, EchoType } from '@/types'
+import type { EchoItem, EchoType, RagCandidate } from '@/types'
 import { generateId } from '@/lib/utils/crypto'
 import { now } from '@/lib/utils/time'
 import { searchVectors } from '@/lib/vector-store'
@@ -23,6 +23,9 @@ const logger = createLogger('rag.service')
 const JITTER_FACTOR = 0.2
 const MAX_RESULTS = 5
 const VECTOR_WEIGHT = 0.7
+/** Per-view top-K for multi-view candidate merge; total candidates capped by CANDIDATES_MAX */
+const TOP_K_PER_VIEW = 5
+const CANDIDATES_MAX = 15
 const KEYWORD_WEIGHT = 0.3
 /** Minimum hybrid score to consider "strongly relevant"; reserve top-2 slots for these when possible. */
 const STRONG_RELEVANCE_MIN = 0.25
@@ -77,6 +80,22 @@ function keywordScore(query: string, content: string): number {
   return score / (content.length + 20)
 }
 
+/** Extract current sentence (last segment by sentence-ending punctuation) for view B. */
+function extractCurrentSentence(fullText: string): string {
+  const t = fullText.trim()
+  if (t.length === 0) return ''
+  const parts = t.split(/[。！？.!?]\s*/)
+  const last = parts[parts.length - 1]?.trim()
+  if (last && last.length > 0) return last.slice(0, 120)
+  return t.slice(0, 80)
+}
+
+/** Extract short keyword-style string for view C (no punctuation, leading chars). */
+function extractKeywordView(fullText: string): string {
+  const t = fullText.replace(/[\s\p{P}]/gu, ' ').trim().slice(0, 80)
+  return t.split(/\s+/).filter(Boolean).join(' ').slice(0, 60) || fullText.trim().slice(0, 40)
+}
+
 /**
  * Apply semantic jitter for creative variation
  */
@@ -116,6 +135,24 @@ function toEchoItem(scored: ScoredChunk, blockId?: string): EchoItem {
     createdAt: now(),
     originalText: full,
   }
+}
+
+/**
+ * Score chunks by keyword only (no embed). Used for sentence/keyword views in multi-view retrieval.
+ */
+function scoreChunksKeywordOnly(
+  chunks: KnowledgeChunk[],
+  query: string,
+): ScoredChunk[] {
+  if (query.trim().length < 1) return chunks.map((chunk) => ({ chunk, score: 0, type: 'lit' as EchoType }))
+  return chunks.map((chunk) => {
+    const s = keywordScore(query, chunk.content)
+    return {
+      chunk,
+      score: Math.min(s * 10, 1),
+      type: s > 0.05 ? 'lit' : 'fact',
+    }
+  })
 }
 
 /**
@@ -333,6 +370,78 @@ async function searchRegular(
   }
 
   return topResults.map((r) => toEchoItem(r, blockId))
+}
+
+/**
+ * Multi-view candidate generation: full text, current sentence, keyword view.
+ * Returns up to CANDIDATES_MAX candidates with baseScore for reranking.
+ * Respects mandatory books when options.mandatoryBookIds are set.
+ */
+export async function generateCandidatesByViews(
+  query: string,
+  options: SearchOptions = {},
+  blockId?: string,
+  preloadedChunks?: KnowledgeChunk[],
+): Promise<RagCandidate[]> {
+  const baseId = options.knowledgeBaseId
+  if (!baseId) return []
+
+  const tLoad = Date.now()
+  const chunks = preloadedChunks ?? (await getChunksByBase(baseId))
+  if (chunks.length === 0) return []
+  if (preloadedChunks == null) {
+    devLog.push('rag', 'candidatesByViews chunks loaded', { ms: Date.now() - tLoad, count: chunks.length })
+  }
+
+  const fullView = query.trim().slice(0, 500)
+  const sentenceView = extractCurrentSentence(query)
+  const keywordView = extractKeywordView(query)
+
+  const hasEmbeddings = chunks.some((c) => c.embedding?.length)
+  const [scoredFull, scoredSentence, scoredKeyword] = await Promise.all([
+    scoreChunks(chunks, fullView, hasEmbeddings),
+    Promise.resolve(scoreChunksKeywordOnly(chunks, sentenceView)),
+    Promise.resolve(scoreChunksKeywordOnly(chunks, keywordView)),
+  ])
+
+  const byId = new Map<string, { chunk: KnowledgeChunk; score: number; type: EchoType }>()
+  function addScored(list: ScoredChunk[]) {
+    list.forEach((s) => {
+      const cur = byId.get(s.chunk.id)
+      const score = s.score
+      if (!cur || score > cur.score) byId.set(s.chunk.id, { chunk: s.chunk, score, type: s.type })
+    })
+  }
+  addScored(scoredFull)
+  addScored(scoredSentence)
+  addScored(scoredKeyword)
+
+  const mandatoryFilePaths = getMandatoryFilePaths(baseId)
+  const mandatoryBookIds = (options.mandatoryBookIds || []).slice(0, 3)
+  const mandatoryMaxSlots = options.mandatoryMaxSlots ?? 1
+
+  const merged = Array.from(byId.entries())
+    .map(([id, { chunk, score, type }]) => ({ chunk, score, type }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, CANDIDATES_MAX)
+
+  let result: ScoredChunk[]
+  if (mandatoryBookIds.length > 0 && mandatoryMaxSlots >= 1) {
+    const mandatory = merged.filter((s) => mandatoryFilePaths.includes(s.chunk.fileId))
+    const rest = merged.filter((s) => !mandatoryFilePaths.includes(s.chunk.fileId))
+    const topMandatory = mandatory.slice(0, mandatoryMaxSlots)
+    result = [...topMandatory, ...rest].slice(0, CANDIDATES_MAX)
+  } else {
+    result = merged
+  }
+
+  const candidates: RagCandidate[] = result.map((s) => {
+    const item = toEchoItem(s, blockId)
+    return { ...item, baseScore: s.score }
+  })
+
+  devLog.push('rag', 'candidatesByViews done', { count: candidates.length })
+  return candidates
 }
 
 export const ragService = {

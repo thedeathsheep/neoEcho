@@ -62,6 +62,16 @@ export interface EchoItem {
   createdAt: string
   /** Full source text for RAG items (for right-panel traceability). Omitted for AI. */
   originalText?: string
+  /** Short summary for RAG context (20–40 chars). Filled by summarizeRagChunks. */
+  shortSummary?: string
+  /** Optional tag (4–6 chars) for RAG context. */
+  tag?: string
+}
+
+/** RAG candidate with score for reranking pipeline. baseScore from retrieval; finalScore after optional rerank. */
+export interface RagCandidate extends EchoItem {
+  baseScore: number
+  finalScore?: number
 }
 
 export interface Document {

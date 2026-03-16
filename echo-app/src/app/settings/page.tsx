@@ -184,6 +184,10 @@ export default function SettingsPage() {
   const [baseUrl, setBaseUrl] = useState(settings.baseUrl)
   const [semanticExpansion, setSemanticExpansion] = useState(settings.semanticExpansion ?? false)
   const [ribbonAiFilter, setRibbonAiFilter] = useState(settings.ribbonAiFilter ?? false)
+  const [ragRerankEnabled, setRagRerankEnabled] = useState(settings.ragRerankEnabled ?? false)
+  const [lowLatencyMode, setLowLatencyMode] = useState(settings.lowLatencyMode ?? false)
+  const [sensoryZoomEnabled, setSensoryZoomEnabled] = useState(settings.sensoryZoomEnabled ?? true)
+  const [clicheDetectionEnabled, setClicheDetectionEnabled] = useState(settings.clicheDetectionEnabled ?? false)
   const [ribbonFilterModel, setRibbonFilterModel] = useState(settings.ribbonFilterModel ?? '')
   const [ribbonPauseSeconds, setRibbonPauseSeconds] = useState(settings.ribbonPauseSeconds ?? 2)
   const [ribbonSlotCount, setRibbonSlotCount] = useState<RibbonSlotCount>(
@@ -219,6 +223,18 @@ export default function SettingsPage() {
   useEffect(() => {
     setRibbonAiFilter(settings.ribbonAiFilter ?? false)
   }, [settings.ribbonAiFilter])
+  useEffect(() => {
+    setRagRerankEnabled(settings.ragRerankEnabled ?? false)
+  }, [settings.ragRerankEnabled])
+  useEffect(() => {
+    setLowLatencyMode(settings.lowLatencyMode ?? false)
+  }, [settings.lowLatencyMode])
+  useEffect(() => {
+    setSensoryZoomEnabled(settings.sensoryZoomEnabled ?? true)
+  }, [settings.sensoryZoomEnabled])
+  useEffect(() => {
+    setClicheDetectionEnabled(settings.clicheDetectionEnabled ?? false)
+  }, [settings.clicheDetectionEnabled])
   useEffect(() => {
     setRibbonFilterModel(settings.ribbonFilterModel ?? '')
   }, [settings.ribbonFilterModel])
@@ -313,6 +329,10 @@ export default function SettingsPage() {
       baseUrl,
       semanticExpansion,
       ribbonAiFilter,
+      ragRerankEnabled,
+      lowLatencyMode,
+      sensoryZoomEnabled,
+      clicheDetectionEnabled,
       ribbonFilterModel: ribbonFilterModel.trim(),
       ribbonPauseSeconds: Math.min(10, Math.max(1, ribbonPauseSeconds)),
       ribbonSettings: {
@@ -883,6 +903,94 @@ export default function SettingsPage() {
                 </label>
               </div>
 
+              {/* RAG rerank (multi-view + AI rerank) */}
+              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
+                <input
+                  type="checkbox"
+                  id="ragRerankEnabled"
+                  checked={ragRerankEnabled}
+                  onChange={(e) => setRagRerankEnabled(e.target.checked)}
+                  className="mt-0.5 rounded border-[var(--color-border)]"
+                />
+                <label htmlFor="ragRerankEnabled" className="flex-1 cursor-pointer">
+                  <span className="block font-medium text-sm text-[var(--color-ink)]">
+                    启用 RAG 重排
+                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
+                      {ragRerankEnabled ? '已开启' : '已关闭'}
+                    </span>
+                  </span>
+                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
+                    多视角检索（全文/当前句/关键词）后，用模型对候选打分重排，提升相关性。低延迟模式下自动关闭。
+                  </span>
+                </label>
+              </div>
+
+              {/* Low latency mode */}
+              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
+                <input
+                  type="checkbox"
+                  id="lowLatencyMode"
+                  checked={lowLatencyMode}
+                  onChange={(e) => setLowLatencyMode(e.target.checked)}
+                  className="mt-0.5 rounded border-[var(--color-border)]"
+                />
+                <label htmlFor="lowLatencyMode" className="flex-1 cursor-pointer">
+                  <span className="block font-medium text-sm text-[var(--color-ink)]">
+                    低延迟模式
+                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
+                      {lowLatencyMode ? '已开启 · 速度优先' : '已关闭'}
+                    </span>
+                  </span>
+                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
+                    关闭查询扩展与 RAG 重排，减少约 2 秒延迟，适合对响应速度要求高的场景。
+                  </span>
+                </label>
+              </div>
+
+              {/* Sensory zoom */}
+              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
+                <input
+                  type="checkbox"
+                  id="sensoryZoomEnabled"
+                  checked={sensoryZoomEnabled}
+                  onChange={(e) => setSensoryZoomEnabled(e.target.checked)}
+                  className="mt-0.5 rounded border-[var(--color-border)]"
+                />
+                <label htmlFor="sensoryZoomEnabled" className="flex-1 cursor-pointer">
+                  <span className="block font-medium text-sm text-[var(--color-ink)]">
+                    感官假肢（细节放大）
+                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
+                      {sensoryZoomEnabled ? '已开启' : '已关闭'}
+                    </span>
+                  </span>
+                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
+                    选中模糊感官句后点「感官放大」或 Alt+Z，从共鸣库涌现触觉/听觉/视觉等微观细节。
+                  </span>
+                </label>
+              </div>
+
+              {/* Cliché / style entropy detection */}
+              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
+                <input
+                  type="checkbox"
+                  id="clicheDetectionEnabled"
+                  checked={clicheDetectionEnabled}
+                  onChange={(e) => setClicheDetectionEnabled(e.target.checked)}
+                  className="mt-0.5 rounded border-[var(--color-border)]"
+                />
+                <label htmlFor="clicheDetectionEnabled" className="flex-1 cursor-pointer">
+                  <span className="block font-medium text-sm text-[var(--color-ink)]">
+                    风格熵增监测（套路语）
+                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
+                      {clicheDetectionEnabled ? '已开启' : '已关闭'}
+                    </span>
+                  </span>
+                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
+                    检测当前段落的陈词滥调，点击「套路语」从共鸣库获取非套路化替代表达。
+                  </span>
+                </label>
+              </div>
+
               {/* Knowledge Base Management Link */}
               <div className="pt-4 border-t border-[var(--color-border)]">
                 <div className="flex items-center justify-between">
@@ -900,6 +1008,26 @@ export default function SettingsPage() {
                   >
                     管理共鸣库
                   </button>
+                </div>
+              </div>
+
+              {/* Echo Gallery (curator report) */}
+              <div className="pt-4 border-t border-[var(--color-border)]">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="block text-sm text-[var(--color-ink-light)] mb-1">
+                      灵感策展集
+                    </label>
+                    <p className="text-xs text-[var(--color-ink-faint)]">
+                      查看已复制回响的策展报告，可导出 Markdown
+                    </p>
+                  </div>
+                  <a
+                    href="/gallery"
+                    className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5 transition-colors inline-block"
+                  >
+                    查看策展报告
+                  </a>
                 </div>
               </div>
             </div>

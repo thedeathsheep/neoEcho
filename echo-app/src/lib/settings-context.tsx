@@ -33,6 +33,14 @@ export interface Settings {
   ribbonPauseSeconds: number
   /** Ribbon content modules and slot count (5–8). */
   ribbonSettings: RibbonSettings
+  /** Enable RAG rerank (experimental): use multi-view candidates + AI rerank. */
+  ragRerankEnabled: boolean
+  /** Low latency mode: skip query expansion and RAG rerank. */
+  lowLatencyMode: boolean
+  /** Sensory zoom: expand selected sensory phrase with micro details from RAG + AI. */
+  sensoryZoomEnabled: boolean
+  /** Style entropy: detect clichés in current paragraph and show alternatives from RAG. */
+  clicheDetectionEnabled: boolean
 }
 
 export const BUILTIN_RIBBON_MODULES: Omit<RibbonModuleConfig, 'enabled' | 'pinned'>[] = [
@@ -72,6 +80,10 @@ const DEFAULT_SETTINGS: Settings = {
   ribbonFilterModel: '',
   ribbonPauseSeconds: 2,
   ribbonSettings: getDefaultRibbonSettings(),
+  ragRerankEnabled: false,
+  lowLatencyMode: false,
+  sensoryZoomEnabled: true,
+  clicheDetectionEnabled: false,
 }
 
 const STORAGE_KEY = 'echo-settings'

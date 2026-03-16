@@ -13,6 +13,12 @@ interface EchoEditorProps {
   onContentChange?: (html: string) => void
   onSave?: () => void
   onInspire?: () => void
+  /** Called when selection changes; provides selected text for e.g. sensory zoom. */
+  onSelectionChange?: (selectedText: string) => void
+  /** Called when user triggers sensory zoom (e.g. Alt+Z). Page should run zoom with current selection. */
+  onSensoryZoom?: () => void
+  /** Called when cursor/selection moves; provides current paragraph text and doc positions for cliché detection. */
+  onParagraphChange?: (paragraphText: string, from: number, to: number) => void
 }
 
 export function EchoEditor({
@@ -21,6 +27,9 @@ export function EchoEditor({
   onContentChange,
   onSave,
   onInspire,
+  onSelectionChange,
+  onSensoryZoom,
+  onParagraphChange,
 }: EchoEditorProps) {
   const handleUpdate = useCallback(
     ({
@@ -29,14 +38,32 @@ export function EchoEditor({
       editor: {
         getText: () => string
         getHTML: () => string
-        state: { selection: { $anchor: { parent: { attrs: { nodeId?: string } } } } }
+        state: {
+          selection: {
+            from: number
+            to: number
+            $anchor: {
+              parent: { attrs: { nodeId?: string } }
+              start: () => number
+              end: () => number
+            }
+          }
+          doc: { textBetween: (from: number, to: number) => string }
+        }
       }
     }) => {
-      const nodeId = editor.state.selection.$anchor.parent.attrs.nodeId ?? null
+      const { state } = editor
+      const nodeId = state.selection.$anchor.parent.attrs.nodeId ?? null
       onUpdate?.(editor.getText(), nodeId)
       onContentChange?.(editor.getHTML())
+      const selectedText = state.doc.textBetween(state.selection.from, state.selection.to).trim()
+      onSelectionChange?.(selectedText)
+      const from = state.selection.$anchor.start()
+      const to = state.selection.$anchor.end()
+      const paragraphText = state.doc.textBetween(from, to)
+      onParagraphChange?.(paragraphText, from, to)
     },
-    [onUpdate, onContentChange],
+    [onUpdate, onContentChange, onSelectionChange, onParagraphChange],
   )
 
   const editor = useEditor({
@@ -67,6 +94,11 @@ export function EchoEditor({
         if (event.altKey && event.key.toLowerCase() === 'i') {
           event.preventDefault()
           onInspire?.()
+          return true
+        }
+        if (event.altKey && event.key.toLowerCase() === 'z') {
+          event.preventDefault()
+          onSensoryZoom?.()
           return true
         }
         return false

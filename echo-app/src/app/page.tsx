@@ -29,12 +29,15 @@ import { useSettings, BUILTIN_RIBBON_MODULES } from '@/lib/settings-context'
 import { debounce } from '@/lib/utils/time'
 import { generateId } from '@/lib/utils/crypto'
 import { useHeartbeat } from '@/hooks/use-heartbeat'
-import { ragService, type MandatoryMaxSlots } from '@/services/rag.service'
+import { ragService, generateCandidatesByViews, type MandatoryMaxSlots } from '@/services/rag.service'
 import {
   generateEchoes,
   generateEchoesForModule,
   expandQueryForRAG,
   filterRibbonCandidates,
+  rerankRagCandidates,
+  correctRagResultsForContext,
+  summarizeRagChunks,
   type ModuleGenerationResult,
 } from '@/services/client-ai.service'
 import {
@@ -44,12 +47,38 @@ import {
   type KnowledgeBase,
 } from '@/services/knowledge-base.service'
 import { allocateSlots, type ModuleResult } from '@/lib/ribbon-allocator'
+import { detectCliches, type ClicheMatch } from '@/lib/cliche-detector'
+import { adoptionStore } from '@/services/adoption-store'
+import { expandSensoryZoom } from '@/services/sensory-zoom.service'
 import type { Document, EchoItem, RibbonModuleConfig, PlaceholderItem } from '@/types'
 
 const AUTO_SAVE_MS = 2000
 const ERROR_THROTTLE_MS = 60_000
 const DISPLAY_ECHOES_KEY = 'echo-display-echoes'
 const DISPLAY_BATCH_KEY = 'echo-display-batch'
+/** Max wait per ribbon module so one slow module does not block the whole refresh. */
+const RIBBON_MODULE_TIMEOUT_MS = 12_000
+
+/** Resolve with fallback after ms so Promise.all does not wait for the slowest. */
+function raceWithTimeout<T>(ms: number, promise: Promise<T>, fallback: T): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ])
+}
+
+/** Pick up to maxSlots RAG items with diversity: same source at most 2 consecutive. */
+function selectDiverseRagForRibbon(items: EchoItem[], maxSlots: number): EchoItem[] {
+  const out: EchoItem[] = []
+  for (const item of items) {
+    if (out.length >= maxSlots) break
+    const source = item.source ?? ''
+    const lastTwo = out.slice(-2).map((x) => x.source ?? '')
+    if (lastTwo.length === 2 && lastTwo[0] === source && lastTwo[1] === source) continue
+    out.push(item)
+  }
+  return out
+}
 
 export type AiStatus = 'idle' | 'unconfigured' | 'loading' | 'connected' | 'error'
 
@@ -67,9 +96,18 @@ export default function Home() {
   const [isRibbonRefreshing, setIsRibbonRefreshing] = useState(false)
   const [selectedRibbonEcho, setSelectedRibbonEcho] = useState<EchoItem | null>(null)
   const selectedRibbonEchoRef = useRef<EchoItem | null>(null)
+  const [selectionText, setSelectionText] = useState('')
+  const [sensoryZoomResults, setSensoryZoomResults] = useState<EchoItem[] | null>(null)
+  const [sensoryZoomLoading, setSensoryZoomLoading] = useState(false)
+  const [clicheMatches, setClicheMatches] = useState<ClicheMatch[]>([])
+  const [paragraphForCliche, setParagraphForCliche] = useState('')
+  const [showClichePopover, setShowClichePopover] = useState(false)
+  const [clicheAlternatives, setClicheAlternatives] = useState<EchoItem[]>([])
+  const [clicheAlternativesLoading, setClicheAlternativesLoading] = useState(false)
 
   // Request ID for concurrency control
   const refreshRequestIdRef = useRef<string>('')
+  const refreshAbortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     selectedRibbonEchoRef.current = selectedRibbonEcho
@@ -131,6 +169,16 @@ export default function Home() {
     lastTextRef.current = text
     devLog.push('ribbon', 'handlePause invoked', { textLen: text.length })
 
+    // Cancel previous refresh in-flight requests to avoid queue buildup
+    try {
+      refreshAbortRef.current?.abort()
+    } catch {
+      // ignore
+    }
+    const controller = new AbortController()
+    refreshAbortRef.current = controller
+    const signal = controller.signal
+
     if (isRibbonRefreshingRef.current) {
       devLog.push('ribbon', 'handlePause skipped: refresh in progress', {})
       return
@@ -183,11 +231,11 @@ export default function Home() {
       const mandatoryBookIds = activeBase?.mandatoryBooks ?? []
       const mandatoryMaxSlots = Math.min(3, Math.max(1, activeBase?.mandatoryMaxSlots ?? 1)) as MandatoryMaxSlots
 
-      // Parallel: query expansion (API) and chunk load (IndexedDB) so total wait ≈ max(expand, load)
+      // Parallel: query expansion (API) and chunk load (IndexedDB). Skip expansion in lowLatencyMode.
       const tParallel = Date.now()
       const expandPromise =
-        settings.semanticExpansion && hasApiKey
-          ? expandQueryForRAG(text, settings)
+        !settings.lowLatencyMode && settings.semanticExpansion && hasApiKey
+          ? expandQueryForRAG(text, settings, signal)
           : Promise.resolve(text.trim())
       const chunksPromise =
         ragModule?.enabled && activeBase?.id
@@ -223,11 +271,12 @@ export default function Home() {
       const quickResultsByModuleId: Record<string, EchoItem[]> = {}
       const customResultsByModuleId: Record<string, EchoItem[]> = {}
 
-      // RAG, Quick, and Custom modules in parallel (Quick/Custom do not need RAG results)
+      // RAG: multi-view + rerank when enabled and not low-latency; else legacy search
+      const useRerankPipeline = ragModule?.enabled && activeBase?.id && settings.ragRerankEnabled && !settings.lowLatencyMode && hasApiKey
       const ragPromise: Promise<EchoItem[]> =
         ragModule?.enabled && activeBase?.id
-          ? ragService
-              .search(
+          ? useRerankPipeline
+            ? generateCandidatesByViews(
                 searchQuery,
                 {
                   knowledgeBaseId: activeBase.id,
@@ -237,61 +286,96 @@ export default function Home() {
                 bid,
                 preloadedChunks.length > 0 ? preloadedChunks : undefined,
               )
-              .then(async (results) => {
-                if (settings.ribbonAiFilter && hasApiKey && results.length > 0) {
-                  return filterRibbonCandidates(text, results, settings)
-                }
-                return results
-              })
+                .then((candidates) => rerankRagCandidates(searchQuery, candidates, settings))
+                .then((candidates) =>
+                  candidates.map(({ baseScore: _b, finalScore: _f, ...item }) => item as EchoItem)
+                )
+                .then(async (results) => {
+                  if (settings.ribbonAiFilter && hasApiKey && results.length > 0) {
+                    return filterRibbonCandidates(text, results, settings, signal)
+                  }
+                  return results
+                })
+            : ragService
+                .search(
+                  searchQuery,
+                  {
+                    knowledgeBaseId: activeBase.id,
+                    mandatoryBookIds,
+                    mandatoryMaxSlots,
+                  },
+                  bid,
+                  preloadedChunks.length > 0 ? preloadedChunks : undefined,
+                )
+                .then(async (results) => {
+                  if (settings.ribbonAiFilter && hasApiKey && results.length > 0) {
+                    return filterRibbonCandidates(text, results, settings, signal)
+                  }
+                  return results
+                })
           : Promise.resolve([])
 
       const noRagPromises: Array<Promise<{ mod: RibbonModuleConfig; items: EchoItem[] }>> = []
       if (hasApiKey && quickModules.length > 0) {
         noRagPromises.push(
-          ...quickModules.map(async (mod) => {
-            try {
-              const result = await generateEchoesForModule(
-                text,
-                [],
-                { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
-                { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
-                bid,
-              )
-              return { mod, items: result.items }
-            } catch (err) {
-              return { mod, items: [], error: (err as Error).message }
-            }
-          }),
+          ...quickModules.map((mod) =>
+            raceWithTimeout(
+              RIBBON_MODULE_TIMEOUT_MS,
+              (async () => {
+                try {
+                  const result = await generateEchoesForModule(
+                    text,
+                    [],
+                    { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
+                    { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
+                    bid,
+                    { signal },
+                  )
+                  return { mod, items: result.items }
+                } catch (err) {
+                  return { mod, items: [], error: (err as Error).message }
+                }
+              })(),
+              { mod, items: [], error: '请求超时' },
+            ),
+          ),
         )
       }
       if (hasApiKey && customModules.length > 0) {
         noRagPromises.push(
-          ...customModules.map(async (mod) => {
-            try {
-              const result = await generateEchoesForModule(
-                text,
-                [], // Custom runs in parallel with RAG, no ragResults yet
-                { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
-                { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
-                bid,
-              )
-              if (result.items.length === 0) {
-                devLog.push('ribbon', 'custom module returned empty', {
-                  moduleId: mod.id,
-                  label: mod.label,
-                })
-              }
-              return { mod, items: result.items }
-            } catch (err) {
-              const errMsg = (err as Error).message
-              devLog.push('ribbon', 'custom module error', {
-                moduleId: mod.id,
-                label: mod.label,
-                error: errMsg,
-              })
-              return { mod, items: [], error: errMsg }
-            }
-          }),
+          ...customModules.map((mod) =>
+            raceWithTimeout(
+              RIBBON_MODULE_TIMEOUT_MS,
+              (async () => {
+                try {
+                  const result = await generateEchoesForModule(
+                    text,
+                    [],
+                    { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
+                    { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
+                    bid,
+                    { signal },
+                  )
+                  if (result.items.length === 0) {
+                    devLog.push('ribbon', 'custom module returned empty', {
+                      moduleId: mod.id,
+                      label: mod.label,
+                    })
+                  }
+                  return { mod, items: result.items }
+                } catch (err) {
+                  const errMsg = (err as Error).message
+                  devLog.push('ribbon', 'custom module error', {
+                    moduleId: mod.id,
+                    label: mod.label,
+                    error: errMsg,
+                  })
+                  return { mod, items: [], error: errMsg }
+                }
+              })(),
+              { mod, items: [], error: '请求超时' },
+            ),
+          ),
         )
       }
 
@@ -308,8 +392,12 @@ export default function Home() {
 
       if (!isCurrentRequest()) return
 
+      const ragResultsOrdered = documentId
+        ? adoptionStore.boostOrderByAdoptions(ragResults, documentId)
+        : ragResults
+
       if (ragModule?.enabled && activeBase?.id) {
-        devLog.push('ribbon', 'RAG done', { count: ragResults.length })
+        devLog.push('ribbon', 'RAG done', { count: ragResultsOrdered.length })
       }
       noRagResultsList.forEach(({ mod, items }) => {
         if (mod.type === 'quick') {
@@ -329,7 +417,7 @@ export default function Home() {
         mandatoryBookIds.length > 0 && ragModule?.enabled
           ? Math.min(mandatoryMaxSlots, mandatoryBookIds.length)
           : 0
-      const fixedPool: EchoItem[] = ragResults.slice(0, ragFixedCount)
+      const fixedPool: EchoItem[] = ragResultsOrdered.slice(0, ragFixedCount)
       noRagResultsList.forEach(({ mod, items }) => {
         if (mod.pinned && items.length > 0) {
           fixedPool.push(items[0])
@@ -340,20 +428,39 @@ export default function Home() {
       if (hasApiKey && aiModulesNeedRag.length > 0) {
         setAiStatus('loading')
         devLog.push('ribbon', 'AI modules (need RAG) start', { count: aiModulesNeedRag.length })
-        const aiPromises = aiModulesNeedRag.map(async (mod) => {
-          try {
-            const result = await generateEchoesForModule(
-              text,
-              ragResults,
-              { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
-              { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
-              bid,
-            )
-            return { mod, items: result.items }
-          } catch (err) {
-            return { mod, items: [], error: (err as Error).message }
-          }
-        })
+        // Preprocess RAG context ONCE per refresh (shared across all AI modules)
+        const tRagPre = Date.now()
+        let ragForAi = ragResultsOrdered
+        try {
+          ragForAi = await correctRagResultsForContext(ragResultsOrdered, settings, signal)
+          ragForAi = await summarizeRagChunks(ragForAi, settings, signal)
+        } catch {
+          // ignore and fall back to raw
+          ragForAi = ragResultsOrdered
+        }
+        devLog.push('ribbon', 'RAG preprocess for AI (shared)', { ms: Date.now() - tRagPre })
+
+        const aiPromises = aiModulesNeedRag.map((mod) =>
+          raceWithTimeout(
+            RIBBON_MODULE_TIMEOUT_MS,
+            (async () => {
+              try {
+                const result = await generateEchoesForModule(
+                  text,
+                  ragForAi,
+                  { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
+                  { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
+                  bid,
+                  { skipRagPreprocess: true, signal },
+                )
+                return { mod, items: result.items }
+              } catch (err) {
+                return { mod, items: [], error: (err as Error).message }
+              }
+            })(),
+            { mod, items: [], error: '请求超时' },
+          ),
+        )
         aiResultsList = await Promise.all(aiPromises)
         aiResultsList.forEach(({ mod, items }) => {
           aiResultsByModuleId[mod.id] = items
@@ -371,8 +478,11 @@ export default function Home() {
 
       if (!isCurrentRequest()) return
 
-      // Build module results for allocator (include RAG non-fixed, Quick, Custom, AI)
-      const ragNonFixed = ragResults.slice(ragFixedCount)
+      // Build module results for allocator: RAG slice with diversity (same doc ≤2 consecutive), rest unchanged
+      const ragNonFixed = selectDiverseRagForRibbon(
+        ragResultsOrdered.slice(ragFixedCount),
+        slotCount,
+      )
       const allModuleResults: ModuleResult[] = [
         ...(ragModule?.enabled && ragNonFixed.length > 0
           ? [{ mod: ragModule, items: ragNonFixed } as ModuleResult]
@@ -415,8 +525,8 @@ export default function Home() {
         setBatchKey((k) => k + 1)
         lastRefreshedTextRef.current = text
         applyRibbonUpdate(final)
-      } else if (ragResults.length > 0 && documentId) {
-        const fallback = ragResults.slice(0, slotCount)
+      } else if (ragResultsOrdered.length > 0 && documentId) {
+        const fallback = ragResultsOrdered.slice(0, slotCount)
         devLog.push('ribbon', 'setDisplayEchoes (fallback RAG)', {
           count: fallback.length,
           batchKey: batchKey + 1,
@@ -500,6 +610,86 @@ export default function Home() {
     saveDocument()
     toast.success('已保存')
   }, [saveDocument])
+
+  const handleSensoryZoom = useCallback(async () => {
+    if (!settings.sensoryZoomEnabled) return
+    // Toggle off if panel is already open
+    if (sensoryZoomResults && sensoryZoomResults.length > 0) {
+      setSensoryZoomResults(null)
+      return
+    }
+    const baseText =
+      selectionText.trim() ||
+      paragraphTextRef.current.trim() ||
+      lastTextRef.current.trim()
+    if (!baseText) return
+    const base = knowledgeBaseService.getActive()
+    if (!base?.id) {
+      toast.error('请先选择共鸣库')
+      return
+    }
+    setSensoryZoomLoading(true)
+    setSensoryZoomResults(null)
+    try {
+      const items = await expandSensoryZoom(baseText, content, base.id, settings)
+      setSensoryZoomResults(items)
+    } catch {
+      toast.error('感官放大失败')
+    } finally {
+      setSensoryZoomLoading(false)
+    }
+  }, [selectionText, content, settings])
+
+  const paragraphTextRef = useRef('')
+  const clicheEnabledRef = useRef(settings.clicheDetectionEnabled)
+  useEffect(() => {
+    clicheEnabledRef.current = settings.clicheDetectionEnabled
+  }, [settings.clicheDetectionEnabled])
+
+  const runClicheDetection = useRef(
+    debounce(() => {
+      const text = paragraphTextRef.current
+      if (!clicheEnabledRef.current) {
+        setClicheMatches([])
+        setParagraphForCliche('')
+        return
+      }
+      setParagraphForCliche(text)
+      setClicheMatches(detectCliches(text))
+    }, 600),
+  ).current
+
+  const handleParagraphChangeFromEditor = useCallback(
+    (paragraphText: string) => {
+      paragraphTextRef.current = paragraphText
+      runClicheDetection()
+    },
+    [runClicheDetection],
+  )
+
+  const handleClicheAlternatives = useCallback(async () => {
+    const base = knowledgeBaseService.getActive()
+    if (!base?.id) {
+      toast.error('请先选择共鸣库')
+      return
+    }
+    const query = (paragraphForCliche.trim().slice(0, 200) || clicheMatches[0]?.phrase) ?? ''
+    if (!query) return
+    setShowClichePopover(true)
+    setClicheAlternativesLoading(true)
+    setClicheAlternatives([])
+    try {
+      const candidates = await generateCandidatesByViews(query, { knowledgeBaseId: base.id })
+      const items = candidates
+        .slice(0, 5)
+        .map(({ baseScore: _b, finalScore: _f, ...item }) => item as EchoItem)
+      setClicheAlternatives(items)
+    } catch {
+      toast.error('获取替代表达失败')
+    } finally {
+      setClicheAlternativesLoading(false)
+    }
+  }, [paragraphForCliche, clicheMatches])
 
   const saveDocumentRef = useRef(saveDocument)
   saveDocumentRef.current = saveDocument
@@ -654,7 +844,7 @@ export default function Home() {
       </div>
 
       <div className="flex-1 flex flex-col min-h-0">
-        <div className="flex-shrink-0 h-[20rem] min-h-[20rem] border-b border-[var(--color-border)] bg-[var(--color-paper)] overflow-hidden">
+        <div className="flex-shrink-0 h-[14rem] min-h-[14rem] border-b border-[var(--color-border)] bg-[var(--color-paper)] overflow-hidden">
           <AmbientRibbon
             echoes={content.trim().length === 0 ? [] : displayEchoes}
             placeholders={displayPlaceholders}
@@ -669,6 +859,11 @@ export default function Home() {
               selectedRibbonEchoRef.current = item
               setSelectedRibbonEcho(item)
             }}
+            onEchoCopied={
+              documentId
+                ? (item) => adoptionStore.recordAdoption(documentId, item)
+                : undefined
+            }
             onPlaceholderRetry={handlePlaceholderRetry}
           />
         </div>
@@ -687,14 +882,110 @@ export default function Home() {
             <div className="w-12 h-0.5 bg-[var(--color-border)]" />
           </div>
 
-          <EchoEditor
-            key={documentId}
-            initialContent={content}
-            onUpdate={handleEditorUpdate}
-            onContentChange={handleContentChange}
-            onSave={handleManualSave}
-            onInspire={handleInspire}
+          <div className="w-full max-w-2xl mx-auto">
+            {settings.sensoryZoomEnabled && (
+              <div className="flex items-center gap-2 mb-2">
+                <button
+                  type="button"
+                  onClick={handleSensoryZoom}
+                  disabled={sensoryZoomLoading}
+                  className="px-3 py-1.5 text-sm rounded-md bg-[var(--color-accent)]/15 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 disabled:opacity-50 transition-colors"
+                >
+                  {sensoryZoomLoading ? '涌现中…' : '感官放大 Alt+Z'}
+                </button>
+              </div>
+            )}
+            {settings.clicheDetectionEnabled && clicheMatches.length > 0 && (
+              <div className="flex items-center gap-2 mb-2">
+                <button
+                  type="button"
+                  onClick={handleClicheAlternatives}
+                  className="px-3 py-1.5 text-sm rounded-md border border-amber-500/40 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10 transition-colors"
+                >
+                  套路语 · 点击获取替代表达
+                </button>
+              </div>
+            )}
+            <EchoEditor
+              key={documentId}
+              initialContent={content}
+              onUpdate={handleEditorUpdate}
+              onContentChange={handleContentChange}
+              onSave={handleManualSave}
+              onInspire={handleInspire}
+              onSelectionChange={setSelectionText}
+              onSensoryZoom={handleSensoryZoom}
+              onParagraphChange={handleParagraphChangeFromEditor}
             />
+          </div>
+          {sensoryZoomResults != null && sensoryZoomResults.length > 0 && (
+            <div className="fixed left-6 top-1/2 -translate-y-1/2 z-50 max-w-sm w-[320px] p-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg max-h-64 overflow-y-auto">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-xs font-medium text-[var(--color-ink-faint)]">感官放大 · 点击复制</span>
+                <button
+                  type="button"
+                  onClick={() => setSensoryZoomResults(null)}
+                  className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] p-1"
+                  aria-label="关闭"
+                >
+                  ✕
+                </button>
+              </div>
+              <ul className="space-y-1.5">
+                {sensoryZoomResults.map((item) => (
+                  <li key={item.id}>
+                    <button
+                      type="button"
+                      className="w-full text-left text-sm py-1.5 px-2 rounded hover:bg-[var(--color-paper)] text-[var(--color-ink)]"
+                      onClick={() => {
+                        const t = item.originalText ?? item.content ?? ''
+                        navigator.clipboard.writeText(t).then(() => toast.success('已复制'), () => {})
+                      }}
+                    >
+                      {item.content}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {showClichePopover && (
+            <div className="fixed left-6 top-1/2 -translate-y-1/2 z-50 max-w-sm w-[320px] p-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg max-h-64 overflow-y-auto">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-xs font-medium text-[var(--color-ink-faint)]">非套路化替代表达 · 点击复制</span>
+                <button
+                  type="button"
+                  onClick={() => setShowClichePopover(false)}
+                  className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] p-1"
+                  aria-label="关闭"
+                >
+                  ✕
+                </button>
+              </div>
+              {clicheAlternativesLoading ? (
+                <p className="text-sm text-[var(--color-ink-faint)]">加载中…</p>
+              ) : clicheAlternatives.length === 0 ? (
+                <p className="text-sm text-[var(--color-ink-faint)]">未找到相关替代</p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {clicheAlternatives.map((item) => (
+                    <li key={item.id}>
+                      <button
+                        type="button"
+                        className="w-full text-left text-sm py-1.5 px-2 rounded hover:bg-[var(--color-paper)] text-[var(--color-ink)]"
+                        onClick={() => {
+                          const t = item.originalText ?? item.content ?? ''
+                          navigator.clipboard.writeText(t).then(() => toast.success('已复制'), () => {})
+                        }}
+                      >
+                        {item.content}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           </div>
         </main>
       </div>

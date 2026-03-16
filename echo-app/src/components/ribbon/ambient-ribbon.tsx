@@ -21,6 +21,8 @@ interface SemanticCloudProps {
   hasKnowledge?: boolean
   isGenerating?: boolean
   onCardClick?: (item: EchoItem) => void
+  /** Called after copy to clipboard succeeds (for adoption / curator). */
+  onEchoCopied?: (item: EchoItem) => void
   /** Currently focused/selected echo for right-panel detail. Alt+Q cycles through cells. */
   selectedEchoId?: string | null
   onRibbonSelect?: (item: EchoItem | null) => void
@@ -53,34 +55,18 @@ function contentFontSize(len: number): string {
   return 'text-xs'
 }
 
-const ribbonFloatStyle = `
-  @keyframes ribbon-float {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-2px); }
-  }
-  .ribbon-float { animation: ribbon-float 4s ease-in-out infinite; will-change: transform; }
-` as const
-
-/** Staggered offsets for cloud-like layout (错落有致) */
-const CLOUD_OFFSETS: [number, number][] = [
-  [0, 0],
-  [6, -5],
-  [-5, 6],
-  [5, 5],
-  [-6, 3],
-  [4, -6],
-]
-
 function EchoFragment({
   item,
   index,
   onCardClick,
+  onEchoCopied,
   selectedEchoId,
   onRibbonSelect,
 }: {
   item: EchoItem
   index: number
   onCardClick?: (item: EchoItem) => void
+  onEchoCopied?: (item: EchoItem) => void
   selectedEchoId?: string | null
   onRibbonSelect?: (item: EchoItem | null) => void
 }) {
@@ -96,12 +82,15 @@ function EchoFragment({
       onCardClick(item)
     } else {
       navigator.clipboard.writeText(fullText).then(
-        () => toast.success('已复制到剪贴板'),
+        () => {
+          toast.success('已复制到剪贴板')
+          onEchoCopied?.(item)
+        },
         () => toast.error('复制失败'),
       )
     }
     onRibbonSelect?.(item)
-  }, [item, fullText, onCardClick, onRibbonSelect])
+  }, [item, fullText, onCardClick, onEchoCopied, onRibbonSelect])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -117,11 +106,9 @@ function EchoFragment({
     onRibbonSelect?.(item)
   }, [item, onRibbonSelect])
 
-  const [ox, oy] = CLOUD_OFFSETS[index % CLOUD_OFFSETS.length]
   return (
     <div
-      className="shrink-0 w-fit max-w-[10rem] pointer-events-auto"
-      style={{ transform: `translate(${ox}px, ${oy}px)` }}
+      className="break-inside-avoid mb-2 pointer-events-auto"
     >
       <motion.div
         style={{ animationDelay: `${index * 0.15}s` }}
@@ -138,11 +125,11 @@ function EchoFragment({
           onClick={handleClick}
           onFocus={handleFocus}
           onKeyDown={handleKeyDown}
-          className={`ribbon-float relative px-2 py-1.5 rounded cursor-pointer transition-all duration-150 hover:ring-1 hover:ring-[var(--color-border)] text-left inline-block ${
+          className={`relative px-2 py-1.5 rounded cursor-pointer transition-all duration-150 hover:ring-1 hover:ring-[var(--color-border)] text-left block ${
             isSelected ? 'ring-2 ring-[var(--color-accent)]' : ''
           }`}
         >
-          <p className={`font-serif tracking-wide leading-relaxed text-[var(--color-ink)] ${contentFontSize(len)} max-w-[10rem]`}>
+          <p className={`font-serif tracking-wide leading-relaxed text-[var(--color-ink)] ${contentFontSize(len)}`}>
             {sanitizeForDisplay(displayText)}
           </p>
           <span
@@ -167,11 +154,9 @@ function PlaceholderFragment({
   index: number
   onRetry?: (moduleId: string) => void
 }) {
-  const [ox, oy] = CLOUD_OFFSETS[index % CLOUD_OFFSETS.length]
   return (
     <div
-      className="shrink-0 w-fit max-w-[10rem] pointer-events-auto"
-      style={{ transform: `translate(${ox}px, ${oy}px)` }}
+      className="break-inside-avoid mb-2 pointer-events-auto"
     >
       <motion.div
         style={{ animationDelay: `${index * 0.15}s` }}
@@ -180,7 +165,7 @@ function PlaceholderFragment({
         exit={{ opacity: 0, transition: { duration: 0.35, ease: 'easeIn' } }}
         transition={{ opacity: { duration: 0.6, delay: index * 0.08, ease: [0.37, 0, 0.2, 1] } }}
       >
-        <div className="ribbon-float relative px-2 py-1.5 rounded text-left inline-block bg-[var(--color-surface)]/50 border border-[var(--color-border)]/50">
+        <div className="relative px-2 py-1.5 rounded text-left block bg-[var(--color-surface)]/50 border border-[var(--color-border)]/50">
           <p className="text-sm leading-snug font-serif text-[var(--color-ink-faint)]">
             {item.status === 'loading' ? '加载中...' : item.status === 'error' ? '生成失败' : '无内容'}
           </p>
@@ -212,6 +197,7 @@ export function AmbientRibbon({
   hasKnowledge = false,
   isGenerating = false,
   onCardClick,
+  onEchoCopied,
   selectedEchoId = null,
   onRibbonSelect,
   onPlaceholderRetry,
@@ -275,8 +261,7 @@ export function AmbientRibbon({
   }, [slotCount, onRibbonSelect])
 
   return (
-    <div className="relative w-full h-full min-h-0 py-3 px-6 z-30 flex flex-col justify-center">
-      <style dangerouslySetInnerHTML={{ __html: ribbonFloatStyle }} />
+    <div className="relative w-full h-full min-h-0 py-2 px-4 z-30 flex flex-col justify-center">
       <div className="relative w-full max-w-6xl mx-auto">
         <AnimatePresence mode="sync">
           {/* State 1: empty hint */}
@@ -292,12 +277,12 @@ export function AmbientRibbon({
             </motion.p>
           )}
 
-          {/* State 2: flex-wrap with staggered offsets for cloud effect */}
+          {/* State 2: CSS columns waterfall layout */}
           {hasContent && (
             <motion.div
               ref={ribbonCellsContainerRef}
               key={`batch-${batchKey}`}
-              className="flex flex-wrap gap-x-4 gap-y-3 justify-center items-start w-full max-w-6xl mx-auto"
+              className="columns-2 md:columns-3 lg:columns-4 xl:columns-5 gap-3 w-full max-w-6xl mx-auto"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0, transition: { duration: 0.4, ease: 'easeIn' } }}
@@ -308,6 +293,7 @@ export function AmbientRibbon({
                   item={echo}
                   index={i}
                   onCardClick={onCardClick}
+                  onEchoCopied={onEchoCopied}
                   selectedEchoId={selectedEchoId}
                   onRibbonSelect={onRibbonSelect}
                 />
