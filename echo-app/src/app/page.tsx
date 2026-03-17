@@ -33,6 +33,7 @@ import { ragService, generateCandidatesByViews, type MandatoryMaxSlots } from '@
 import {
   generateEchoes,
   generateEchoesForModule,
+  probeChatCompletions,
   expandQueryForRAG,
   filterRibbonCandidates,
   rerankRagCandidates,
@@ -46,7 +47,7 @@ import {
   getChunksByBase,
   type KnowledgeBase,
 } from '@/services/knowledge-base.service'
-import { allocateSlots, type ModuleResult } from '@/lib/ribbon-allocator'
+import { allocateSlots, createLoadingPlaceholders, type ModuleResult } from '@/lib/ribbon-allocator'
 import { detectCliches, type ClicheMatch } from '@/lib/cliche-detector'
 import { adoptionStore } from '@/services/adoption-store'
 import { expandSensoryZoom } from '@/services/sensory-zoom.service'
@@ -58,6 +59,13 @@ const DISPLAY_ECHOES_KEY = 'echo-display-echoes'
 const DISPLAY_BATCH_KEY = 'echo-display-batch'
 /** Max wait per ribbon module so one slow module does not block the whole refresh. */
 const RIBBON_MODULE_TIMEOUT_MS = 12_000
+const RIBBON_MODULE_TIMEOUT_RELIABLE_MS = 60_000
+
+function debugIngest(hypothesisId: string, location: string, message: string, data: Record<string, unknown>) {
+  // #region agent log
+  fetch('http://127.0.0.1:7776/ingest/bd75bf12-cc2c-45c2-9d32-c1c193905a25',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'626617'},body:JSON.stringify({sessionId:'626617',runId:'diag',hypothesisId,location,message,data,timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+}
 
 /** Resolve with fallback after ms so Promise.all does not wait for the slowest. */
 function raceWithTimeout<T>(ms: number, promise: Promise<T>, fallback: T): Promise<T> {
@@ -170,8 +178,12 @@ export default function Home() {
     lastTextRef.current = text
     devLog.push('ribbon', 'handlePause invoked', { textLen: text.length })
 
-    // If a refresh is already in progress, cancel it and start a new one (latest wins).
-    if (isRibbonRefreshingRef.current) {
+    const isReliable = !!settings.reliableRibbonMode
+
+    // If a refresh is already in progress:
+    // - normal mode: cancel and restart (latest wins)
+    // - reliable mode: keep running (so we can actually get output)
+    if (isRibbonRefreshingRef.current && !isReliable) {
       devLog.push('ribbon', 'handlePause: refresh in progress, aborting previous and restarting', {})
       try {
         refreshAbortRef.current?.abort()
@@ -180,6 +192,9 @@ export default function Home() {
       }
       // mark not refreshing so the new run can proceed
       isRibbonRefreshingRef.current = false
+    } else if (isRibbonRefreshingRef.current && isReliable) {
+      devLog.push('ribbon', 'handlePause skipped: refresh in progress (reliable mode)', {})
+      return
     }
 
     // Cancel previous refresh in-flight requests to avoid queue buildup (only when we are actually starting)
@@ -191,6 +206,14 @@ export default function Home() {
     const controller = new AbortController()
     refreshAbortRef.current = controller
     const signal = controller.signal
+    debugIngest('H2', 'page.tsx:handlePause', 'refresh start', {
+      textLen: text.length,
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+      semanticExpansion: settings.semanticExpansion,
+      lowLatencyMode: settings.lowLatencyMode,
+      ragRerankEnabled: settings.ragRerankEnabled,
+    })
     if (text.trim().length < 2) {
       devLog.push('ribbon', 'handlePause early exit: text too short', {})
       return
@@ -220,6 +243,10 @@ export default function Home() {
       ...savedModules.filter((m: RibbonModuleConfig) => m.type === 'custom'),
     ]
     const enabledModules = allModules.filter((m: RibbonModuleConfig) => m.enabled)
+    // Show loading placeholders immediately for visibility (reliable mode only).
+    if (isReliable) {
+      setDisplayPlaceholders(createLoadingPlaceholders(enabledModules))
+    }
 
     const shuffle = <T,>(arr: T[]): T[] => {
       const out = [...arr]
@@ -276,8 +303,17 @@ export default function Home() {
       const quickResultsByModuleId: Record<string, EchoItem[]> = {}
       const customResultsByModuleId: Record<string, EchoItem[]> = {}
 
+      // Probe chat endpoint once per refresh to avoid wasting time when provider is stalled.
+      // In reliable mode, do not skip AI even if probe fails (we want real output for debugging).
+      const probe = hasApiKey
+        ? await probeChatCompletions({ apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model }, signal)
+        : { ok: false, elapsedMs: 0 }
+      const aiProviderStalled = !isReliable && hasApiKey && !probe.ok
+      debugIngest('H6', 'page.tsx:handlePause', 'probe result', { ...probe, aiProviderStalled, isReliable })
+
       // RAG: multi-view + rerank when enabled and not low-latency; else legacy search
       const useRerankPipeline = ragModule?.enabled && activeBase?.id && settings.ragRerankEnabled && !settings.lowLatencyMode && hasApiKey
+      const tRagPromiseStart = Date.now()
       const ragPromise: Promise<EchoItem[]> =
         ragModule?.enabled && activeBase?.id
           ? useRerankPipeline
@@ -319,13 +355,26 @@ export default function Home() {
                   return results
                 })
           : Promise.resolve([])
+      ragPromise.then((r) => {
+        debugIngest('H7', 'page.tsx:ragPromise', 'ragPromise resolved', {
+          ms: Date.now() - tRagPromiseStart,
+          count: r.length,
+        })
+        return r
+      }).catch((e) => {
+        debugIngest('H7', 'page.tsx:ragPromise', 'ragPromise rejected', {
+          ms: Date.now() - tRagPromiseStart,
+          errName: (e as Error)?.name,
+          errMsg: (e as Error)?.message,
+        })
+      })
 
-      const noRagPromises: Array<Promise<{ mod: RibbonModuleConfig; items: EchoItem[] }>> = []
-      if (hasApiKey && quickModules.length > 0) {
+      const noRagPromises: Array<Promise<{ mod: RibbonModuleConfig; items: EchoItem[]; error?: string }>> = []
+      if (hasApiKey && !aiProviderStalled && quickModules.length > 0) {
         noRagPromises.push(
           ...quickModules.map((mod) =>
             raceWithTimeout(
-              RIBBON_MODULE_TIMEOUT_MS,
+              isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : RIBBON_MODULE_TIMEOUT_MS,
               (async () => {
                 try {
                   const result = await generateEchoesForModule(
@@ -334,7 +383,7 @@ export default function Home() {
                     { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
                     { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
                     bid,
-                    { signal },
+                    { signal, timeoutMs: isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : undefined },
                   )
                   return { mod, items: result.items }
                 } catch (err) {
@@ -346,11 +395,18 @@ export default function Home() {
           ),
         )
       }
-      if (hasApiKey && customModules.length > 0) {
+      if (hasApiKey && aiProviderStalled && quickModules.length > 0) {
+        noRagPromises.push(
+          ...quickModules.map((mod) =>
+            Promise.resolve({ mod, items: [], error: 'AI 服务当前不可用（探针超时），已跳过生成' }),
+          ),
+        )
+      }
+      if (hasApiKey && !aiProviderStalled && customModules.length > 0) {
         noRagPromises.push(
           ...customModules.map((mod) =>
             raceWithTimeout(
-              RIBBON_MODULE_TIMEOUT_MS,
+              isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : RIBBON_MODULE_TIMEOUT_MS,
               (async () => {
                 try {
                   const result = await generateEchoesForModule(
@@ -359,7 +415,7 @@ export default function Home() {
                     { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
                     { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
                     bid,
-                    { signal },
+                    { signal, timeoutMs: isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : undefined },
                   )
                   if (result.items.length === 0) {
                     devLog.push('ribbon', 'custom module returned empty', {
@@ -383,6 +439,13 @@ export default function Home() {
           ),
         )
       }
+      if (hasApiKey && aiProviderStalled && customModules.length > 0) {
+        noRagPromises.push(
+          ...customModules.map((mod) =>
+            Promise.resolve({ mod, items: [], error: 'AI 服务当前不可用（探针超时），已跳过生成' }),
+          ),
+        )
+      }
 
       if (hasApiKey && (ragModule?.enabled || noRagPromises.length > 0)) {
         setAiStatus('loading')
@@ -393,7 +456,16 @@ export default function Home() {
         })
       }
 
+      const tJoinStart = Date.now()
+      debugIngest('H8', 'page.tsx:handlePause', 'await join (rag + noRag) start', {
+        noRagPromises: noRagPromises.length,
+      })
       const [ragResults, ...noRagResultsList] = await Promise.all([ragPromise, ...noRagPromises])
+      debugIngest('H8', 'page.tsx:handlePause', 'await join (rag + noRag) done', {
+        ms: Date.now() - tJoinStart,
+        ragCount: ragResults.length,
+        noRagCount: noRagResultsList.length,
+      })
 
       if (!isCurrentRequest()) return
 
@@ -430,7 +502,13 @@ export default function Home() {
       })
 
       let aiResultsList: ModuleResult[] = []
-      if (hasApiKey && aiModulesNeedRag.length > 0) {
+      if (hasApiKey && aiProviderStalled && aiModulesNeedRag.length > 0) {
+        aiResultsList = aiModulesNeedRag.map((mod) => ({
+          mod,
+          items: [],
+          error: 'AI 服务当前不可用（探针超时），已跳过生成',
+        }))
+      } else if (hasApiKey && !aiProviderStalled && aiModulesNeedRag.length > 0) {
         setAiStatus('loading')
         devLog.push('ribbon', 'AI modules (need RAG) start', { count: aiModulesNeedRag.length })
         // Preprocess RAG context ONCE per refresh (shared across all AI modules)
@@ -451,7 +529,7 @@ export default function Home() {
 
         const aiPromises = aiModulesNeedRag.map((mod) =>
           raceWithTimeout(
-            RIBBON_MODULE_TIMEOUT_MS,
+            isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : RIBBON_MODULE_TIMEOUT_MS,
             (async () => {
               try {
                 const result = await generateEchoesForModule(
@@ -460,7 +538,7 @@ export default function Home() {
                   { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
                   { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
                   bid,
-                  { skipRagPreprocess: true, signal },
+                  { skipRagPreprocess: true, signal, timeoutMs: isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : undefined },
                 )
                 return { mod, items: result.items }
               } catch (err) {

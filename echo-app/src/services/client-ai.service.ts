@@ -40,6 +40,60 @@ function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
   ])
 }
 
+function debugIngest(hypothesisId: string, location: string, message: string, data: Record<string, unknown>) {
+  // #region agent log
+  fetch('http://127.0.0.1:7776/ingest/bd75bf12-cc2c-45c2-9d32-c1c193905a25',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'626617'},body:JSON.stringify({sessionId:'626617',runId:'diag',hypothesisId,location,message,data,timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+}
+
+export async function probeChatCompletions(
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; elapsedMs: number; status?: number; error?: string }> {
+  const url = apiUrl(settings.baseUrl, '/chat/completions')
+  const start = Date.now()
+  try {
+    debugIngest('H6', 'client-ai.service.ts:probeChatCompletions:start', 'probe start', {
+      baseUrl: settings.baseUrl,
+      model: settings.model,
+      url,
+    })
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${settings.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: settings.model,
+        messages: [
+          { role: 'system', content: 'Return exactly: OK' },
+          { role: 'user', content: 'OK' },
+        ],
+        temperature: 0,
+        max_tokens: 1,
+      }),
+      signal: withTimeout(signal, 3000),
+    })
+    const elapsedMs = Date.now() - start
+    debugIngest('H6', 'client-ai.service.ts:probeChatCompletions:res', 'probe response', {
+      status: res.status,
+      elapsedMs,
+      ok: res.ok,
+    })
+    return { ok: res.ok, elapsedMs, status: res.status }
+  } catch (e) {
+    const elapsedMs = Date.now() - start
+    debugIngest('H6', 'client-ai.service.ts:probeChatCompletions:catch', 'probe error', {
+      elapsedMs,
+      errName: (e as Error)?.name,
+      errMsg: (e as Error)?.message,
+      isDOMException: e instanceof DOMException,
+    })
+    return { ok: false, elapsedMs, error: (e as Error)?.message }
+  }
+}
+
 export async function validateApiKey(
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
 ): Promise<ValidateResult> {
@@ -729,7 +783,7 @@ export async function generateEchoesForModule(
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model' | 'ribbonFilterModel'>,
   module: { type: RibbonModuleType; id: string; prompt?: string; model?: string },
   blockId?: string,
-  options?: { allowRagFallback?: boolean; skipRagPreprocess?: boolean; signal?: AbortSignal }
+  options?: { allowRagFallback?: boolean; skipRagPreprocess?: boolean; signal?: AbortSignal; timeoutMs?: number }
 ): Promise<ModuleGenerationResult> {
   // Support: ai:*, custom, quick types
   const isSupported = module.type.startsWith('ai:') || module.type === 'custom' || module.type === 'quick'
@@ -782,9 +836,20 @@ export async function generateEchoesForModule(
   const sourceLabel = getModuleDisplayLabel(module.type, module.id)
   const fetchStart = Date.now()
 
-  // #region agent log
-  fetch('http://127.0.0.1:7776/ingest/bd75bf12-cc2c-45c2-9d32-c1c193905a25',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'626617'},body:JSON.stringify({sessionId:'626617',location:'client-ai.service.ts:fetchStart',message:'generateEchoesForModule fetch start',data:{moduleId:module.id,sourceLabel,model:modelToUse},hypothesisId:'A',timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
+  debugIngest('H1', 'client-ai.service.ts:generateEchoesForModule:start', 'chat.completions start', {
+    moduleId: module.id,
+    sourceLabel,
+    type: module.type,
+    baseUrl: settings.baseUrl,
+    url: apiUrl(settings.baseUrl, '/chat/completions'),
+    model: modelToUse,
+    systemPromptLen: systemPrompt.length,
+    userContentLen: userContent.length,
+    maxTokens,
+    hasRag: ragResults.length > 0,
+    ragCount: ragResults.length,
+    signalProvided: !!options?.signal,
+  })
 
   let res: Response
   try {
@@ -800,10 +865,22 @@ export async function generateEchoesForModule(
         temperature: module.type === 'custom' ? 0.3 : 0.85,
         max_tokens: maxTokens,
       }),
-      signal: withTimeout(options?.signal, 12000),
+      signal: withTimeout(options?.signal, options?.timeoutMs ?? 12000),
     })
   } catch (err) {
     const elapsed = Date.now() - fetchStart
+    debugIngest('H1', 'client-ai.service.ts:generateEchoesForModule:catch', 'chat.completions error', {
+      moduleId: module.id,
+      sourceLabel,
+      type: module.type,
+      baseUrl: settings.baseUrl,
+      url: apiUrl(settings.baseUrl, '/chat/completions'),
+      model: modelToUse,
+      elapsedMs: elapsed,
+      errName: (err as Error)?.name,
+      errMsg: (err as Error)?.message,
+      isDOMException: err instanceof DOMException,
+    })
     devLog.push('ai', `generateEchoesForModule [${sourceLabel}] fetch error`, {
       moduleId: module.id,
       errName: (err as Error)?.name,
@@ -846,6 +923,16 @@ export async function generateEchoesForModule(
   const choice = data.choices?.[0]
   const text = choice?.message?.content ?? ''
   const finishReason = choice?.finish_reason
+  debugIngest('H1', 'client-ai.service.ts:generateEchoesForModule:ok', 'chat.completions ok', {
+    moduleId: module.id,
+    sourceLabel,
+    type: module.type,
+    model: modelToUse,
+    status: res.status,
+    elapsedMs: Date.now() - fetchStart,
+    textLen: text.length,
+    finishReason: finishReason ?? '(unknown)',
+  })
 
   devLog.push('ai', `generateEchoesForModule [${sourceLabel}] response`, {
     moduleId: module.id,

@@ -188,6 +188,7 @@ export default function SettingsPage() {
   const [lowLatencyMode, setLowLatencyMode] = useState(settings.lowLatencyMode ?? false)
   const [sensoryZoomEnabled, setSensoryZoomEnabled] = useState(settings.sensoryZoomEnabled ?? true)
   const [clicheDetectionEnabled, setClicheDetectionEnabled] = useState(settings.clicheDetectionEnabled ?? false)
+  const [reliableRibbonMode, setReliableRibbonMode] = useState(settings.reliableRibbonMode ?? false)
   const [ribbonFilterModel, setRibbonFilterModel] = useState(settings.ribbonFilterModel ?? '')
   const [ribbonPauseSeconds, setRibbonPauseSeconds] = useState(settings.ribbonPauseSeconds ?? 2)
   const [ribbonSlotCount, setRibbonSlotCount] = useState<RibbonSlotCount>(
@@ -235,6 +236,9 @@ export default function SettingsPage() {
   useEffect(() => {
     setClicheDetectionEnabled(settings.clicheDetectionEnabled ?? false)
   }, [settings.clicheDetectionEnabled])
+  useEffect(() => {
+    setReliableRibbonMode(settings.reliableRibbonMode ?? false)
+  }, [settings.reliableRibbonMode])
   useEffect(() => {
     setRibbonFilterModel(settings.ribbonFilterModel ?? '')
   }, [settings.ribbonFilterModel])
@@ -333,6 +337,7 @@ export default function SettingsPage() {
       lowLatencyMode,
       sensoryZoomEnabled,
       clicheDetectionEnabled,
+      reliableRibbonMode,
       ribbonFilterModel: ribbonFilterModel.trim(),
       ribbonPauseSeconds: Math.min(10, Math.max(1, ribbonPauseSeconds)),
       ribbonSettings: {
@@ -987,6 +992,28 @@ export default function SettingsPage() {
                   </span>
                   <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
                     检测当前段落的陈词滥调，点击「套路语」从共鸣库获取非套路化替代表达。
+                  </span>
+                </label>
+              </div>
+
+              {/* Reliable ribbon mode */}
+              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
+                <input
+                  type="checkbox"
+                  id="reliableRibbonMode"
+                  checked={reliableRibbonMode}
+                  onChange={(e) => setReliableRibbonMode(e.target.checked)}
+                  className="mt-0.5 rounded border-[var(--color-border)]"
+                />
+                <label htmlFor="reliableRibbonMode" className="flex-1 cursor-pointer">
+                  <span className="block font-medium text-sm text-[var(--color-ink)]">
+                    织带可靠模式
+                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
+                      {reliableRibbonMode ? '已开启 · 稳定优先' : '已关闭'}
+                    </span>
+                  </span>
+                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
+                    用更长超时并显示“生成中”占位卡，优先确保看到实际产出（适合排查供应商/提示词问题，可能更慢）。
                   </span>
                 </label>
               </div>

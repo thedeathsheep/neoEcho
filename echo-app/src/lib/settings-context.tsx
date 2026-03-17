@@ -41,6 +41,8 @@ export interface Settings {
   sensoryZoomEnabled: boolean
   /** Style entropy: detect clichés in current paragraph and show alternatives from RAG. */
   clicheDetectionEnabled: boolean
+  /** Reliable mode: prioritize getting any output; use longer timeouts and show loading placeholders. */
+  reliableRibbonMode: boolean
 }
 
 export const BUILTIN_RIBBON_MODULES: Omit<RibbonModuleConfig, 'enabled' | 'pinned'>[] = [
@@ -84,6 +86,7 @@ const DEFAULT_SETTINGS: Settings = {
   lowLatencyMode: false,
   sensoryZoomEnabled: true,
   clicheDetectionEnabled: false,
+  reliableRibbonMode: false,
 }
 
 const STORAGE_KEY = 'echo-settings'
