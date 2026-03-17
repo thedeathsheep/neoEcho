@@ -169,7 +169,19 @@ export default function Home() {
     lastTextRef.current = text
     devLog.push('ribbon', 'handlePause invoked', { textLen: text.length })
 
-    // Cancel previous refresh in-flight requests to avoid queue buildup
+    // If a refresh is already in progress, cancel it and start a new one (latest wins).
+    if (isRibbonRefreshingRef.current) {
+      devLog.push('ribbon', 'handlePause: refresh in progress, aborting previous and restarting', {})
+      try {
+        refreshAbortRef.current?.abort()
+      } catch {
+        // ignore
+      }
+      // mark not refreshing so the new run can proceed
+      isRibbonRefreshingRef.current = false
+    }
+
+    // Cancel previous refresh in-flight requests to avoid queue buildup (only when we are actually starting)
     try {
       refreshAbortRef.current?.abort()
     } catch {
@@ -178,15 +190,6 @@ export default function Home() {
     const controller = new AbortController()
     refreshAbortRef.current = controller
     const signal = controller.signal
-
-    if (isRibbonRefreshingRef.current) {
-      devLog.push('ribbon', 'handlePause skipped: refresh in progress', {})
-      return
-    }
-    if (selectedRibbonEchoRef.current !== null) {
-      devLog.push('ribbon', 'handlePause skipped: detail panel open (ribbon frozen)', {})
-      return
-    }
     if (text.trim().length < 2) {
       devLog.push('ribbon', 'handlePause early exit: text too short', {})
       return
