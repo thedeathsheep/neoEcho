@@ -435,8 +435,12 @@ export default function Home() {
         const tRagPre = Date.now()
         let ragForAi = ragResultsOrdered
         try {
-          ragForAi = await correctRagResultsForContext(ragResultsOrdered, settings, signal)
-          ragForAi = await summarizeRagChunks(ragForAi, settings, signal)
+          // Keep this step fast: prioritize summarization; if it can't finish quickly, fall back to raw.
+          ragForAi = await raceWithTimeout(
+            2500,
+            summarizeRagChunks(ragResultsOrdered, settings, signal),
+            ragResultsOrdered,
+          )
         } catch {
           // ignore and fall back to raw
           ragForAi = ragResultsOrdered

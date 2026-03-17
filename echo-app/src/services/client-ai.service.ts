@@ -455,6 +455,11 @@ export async function rerankRagCandidates(
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model' | 'ribbonFilterModel'>,
 ): Promise<RagCandidate[]> {
   if (!settings.apiKey || candidates.length === 0) return candidates
+  // If there is only 1 candidate, rerank is meaningless and just adds latency.
+  if (candidates.length <= 1) {
+    const baseMax = Math.max(...candidates.map((c) => c.baseScore), 1)
+    return candidates.map((c) => ({ ...c, finalScore: c.baseScore / baseMax }))
+  }
   const model = (settings.ribbonFilterModel || '').trim() || settings.model
   const toRerank = candidates.slice(0, RERANK_RAG_TOP_N)
   const list = toRerank
