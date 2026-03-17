@@ -26,23 +26,34 @@ const DEFAULT_OPTIONS: ChunkOptions = {
  * Split text into sentence-level chunks
  */
 function splitIntoSentences(text: string, splitOn: RegExp): string[] {
-  const parts = text.split(splitOn)
   const sentences: string[] = []
-
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i].trim()
-    if (!part) continue
-
-    // Add back the delimiter if it was captured
-    const delimiter = text.match(splitOn)?.[0] || ''
-    const sentence = part + (i < parts.length - 1 ? delimiter : '')
-
-    if (sentence.length > 0) {
-      sentences.push(sentence)
-    }
+  const re = new RegExp(splitOn.source, splitOn.flags.includes('g') ? splitOn.flags : `${splitOn.flags}g`)
+  let lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) {
+    const end = m.index + m[0].length
+    const chunk = text.slice(lastIndex, end).trim()
+    if (chunk) sentences.push(chunk)
+    lastIndex = end
   }
-
+  const tail = text.slice(lastIndex).trim()
+  if (tail) sentences.push(tail)
   return sentences
+}
+
+function safeOverlapTail(prev: string, overlap: number): string {
+  const tail = prev.slice(-overlap)
+  // Try to start from last sentence boundary so we don't begin with a dangling particle like "的/而/并"
+  const idx = Math.max(
+    tail.lastIndexOf('。'),
+    tail.lastIndexOf('！'),
+    tail.lastIndexOf('？'),
+    tail.lastIndexOf('.'),
+    tail.lastIndexOf('!'),
+    tail.lastIndexOf('?'),
+    tail.lastIndexOf('\n'),
+  )
+  return idx >= 0 ? tail.slice(idx + 1) : tail
 }
 
 /**
@@ -62,7 +73,7 @@ function mergeSentencesIntoChunks(
     if (sentence.length > maxSize) {
       if (currentChunk.length >= minSize) {
         chunks.push(currentChunk.trim())
-        currentChunk = currentChunk.slice(-overlap)
+        currentChunk = safeOverlapTail(currentChunk, overlap)
       }
 
       // Split long sentence by commas and semicolons
@@ -72,7 +83,7 @@ function mergeSentencesIntoChunks(
           if (currentChunk.length >= minSize) {
             chunks.push(currentChunk.trim())
           }
-          currentChunk = currentChunk.slice(-overlap) + part
+          currentChunk = safeOverlapTail(currentChunk, overlap) + part
         } else {
           currentChunk += part
         }
@@ -87,7 +98,7 @@ function mergeSentencesIntoChunks(
         chunks.push(currentChunk.trim())
       }
       // Start new chunk with overlap
-      currentChunk = currentChunk.slice(-overlap) + sentence
+      currentChunk = safeOverlapTail(currentChunk, overlap) + sentence
     } else {
       currentChunk += sentence
     }
@@ -176,6 +187,9 @@ export function normalizeChunkContentForDedup(s: string): string {
 export function isLowValueChunkContent(content: string): boolean {
   const t = content.trim()
   if (t.length < 2) return true
+
+  // Likely dangling fragment caused by overlap / bad OCR line breaks
+  if (t.length <= 40 && /^[的而并且但或则就又]\S/.test(t)) return true
 
   // URL or domain
   if (/^https?:\/\//i.test(t) || /^www\./i.test(t) || /\.(com|cn|net|org)\s*$/i.test(t)) {
