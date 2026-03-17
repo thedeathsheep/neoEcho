@@ -117,6 +117,7 @@ export default function Home() {
   const lastTextRef = useRef('')
   const lastProcessedTextRef = useRef('')
   const lastRefreshedTextRef = useRef('')
+  const lastRefreshHadErrorsRef = useRef(false)
   const lastErrorTimeRef = useRef<Record<string, number>>({})
   const isRibbonRefreshingRef = useRef(false)
 
@@ -194,7 +195,8 @@ export default function Home() {
       devLog.push('ribbon', 'handlePause early exit: text too short', {})
       return
     }
-    if (text === lastRefreshedTextRef.current) {
+    // If last refresh for the same text had errors/timeouts (placeholders), allow retry.
+    if (text === lastRefreshedTextRef.current && !lastRefreshHadErrorsRef.current) {
       devLog.push('ribbon', 'handlePause early exit: same as lastRefreshed', {})
       return
     }
@@ -531,6 +533,9 @@ export default function Home() {
         setDisplayPlaceholders(placeholders)
         setBatchKey((k) => k + 1)
         lastRefreshedTextRef.current = text
+        lastRefreshHadErrorsRef.current =
+          placeholders.length > 0 ||
+          allModuleResults.some((r) => !!(r as { error?: string }).error)
         applyRibbonUpdate(final)
       } else if (ragResultsOrdered.length > 0 && documentId) {
         const fallback = ragResultsOrdered.slice(0, slotCount)
@@ -543,6 +548,8 @@ export default function Home() {
         setDisplayPlaceholders([])
         setBatchKey((k) => k + 1)
         lastRefreshedTextRef.current = text
+        // Fallback means some modules failed or were empty; allow retry on same text.
+        lastRefreshHadErrorsRef.current = true
         applyRibbonUpdate(fallback)
       }
     } catch (err) {
