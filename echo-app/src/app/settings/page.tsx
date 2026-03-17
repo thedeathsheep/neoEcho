@@ -182,13 +182,15 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState(settings.apiKey)
   const [model, setModel] = useState(settings.model)
   const [baseUrl, setBaseUrl] = useState(settings.baseUrl)
+  const [ribbonRunProfile, setRibbonRunProfile] = useState<'balanced' | 'fast' | 'reliable'>(
+    settings.ribbonRunProfile ??
+      (settings.reliableRibbonMode ? 'reliable' : settings.lowLatencyMode ? 'fast' : 'balanced')
+  )
   const [semanticExpansion, setSemanticExpansion] = useState(settings.semanticExpansion ?? false)
   const [ribbonAiFilter, setRibbonAiFilter] = useState(settings.ribbonAiFilter ?? false)
   const [ragRerankEnabled, setRagRerankEnabled] = useState(settings.ragRerankEnabled ?? false)
-  const [lowLatencyMode, setLowLatencyMode] = useState(settings.lowLatencyMode ?? false)
   const [sensoryZoomEnabled, setSensoryZoomEnabled] = useState(settings.sensoryZoomEnabled ?? true)
   const [clicheDetectionEnabled, setClicheDetectionEnabled] = useState(settings.clicheDetectionEnabled ?? false)
-  const [reliableRibbonMode, setReliableRibbonMode] = useState(settings.reliableRibbonMode ?? false)
   const [ribbonFilterModel, setRibbonFilterModel] = useState(settings.ribbonFilterModel ?? '')
   const [ribbonPauseSeconds, setRibbonPauseSeconds] = useState(settings.ribbonPauseSeconds ?? 2)
   const [ribbonSlotCount, setRibbonSlotCount] = useState<RibbonSlotCount>(
@@ -218,6 +220,15 @@ export default function SettingsPage() {
   const [filterValidationStatus, setFilterValidationStatus] = useState<ValidationStatus>('idle')
   const [filterValidationMsg, setFilterValidationMsg] = useState('')
 
+  const isFastProfile = ribbonRunProfile === 'fast'
+  const isReliableProfile = ribbonRunProfile === 'reliable'
+
+  useEffect(() => {
+    setRibbonRunProfile(
+      settings.ribbonRunProfile ??
+        (settings.reliableRibbonMode ? 'reliable' : settings.lowLatencyMode ? 'fast' : 'balanced')
+    )
+  }, [settings.ribbonRunProfile, settings.reliableRibbonMode, settings.lowLatencyMode])
   useEffect(() => {
     setSemanticExpansion(settings.semanticExpansion ?? false)
   }, [settings.semanticExpansion])
@@ -228,17 +239,16 @@ export default function SettingsPage() {
     setRagRerankEnabled(settings.ragRerankEnabled ?? false)
   }, [settings.ragRerankEnabled])
   useEffect(() => {
-    setLowLatencyMode(settings.lowLatencyMode ?? false)
-  }, [settings.lowLatencyMode])
-  useEffect(() => {
     setSensoryZoomEnabled(settings.sensoryZoomEnabled ?? true)
   }, [settings.sensoryZoomEnabled])
   useEffect(() => {
     setClicheDetectionEnabled(settings.clicheDetectionEnabled ?? false)
   }, [settings.clicheDetectionEnabled])
   useEffect(() => {
-    setReliableRibbonMode(settings.reliableRibbonMode ?? false)
-  }, [settings.reliableRibbonMode])
+    if (!isFastProfile) return
+    setSemanticExpansion(false)
+    setRagRerankEnabled(false)
+  }, [isFastProfile])
   useEffect(() => {
     setRibbonFilterModel(settings.ribbonFilterModel ?? '')
   }, [settings.ribbonFilterModel])
@@ -327,17 +337,22 @@ export default function SettingsPage() {
   // Custom module management is now handled directly in the module editor
 
   const handleSave = () => {
+    const effectiveSemanticExpansion = isFastProfile ? false : semanticExpansion
+    const effectiveRagRerank = isFastProfile ? false : ragRerankEnabled
+    const effectiveLowLatencyMode = ribbonRunProfile === 'fast'
+    const effectiveReliableRibbonMode = ribbonRunProfile === 'reliable'
     updateSettings({
       apiKey,
       model,
       baseUrl,
-      semanticExpansion,
+      ribbonRunProfile,
+      semanticExpansion: effectiveSemanticExpansion,
       ribbonAiFilter,
-      ragRerankEnabled,
-      lowLatencyMode,
+      ragRerankEnabled: effectiveRagRerank,
+      lowLatencyMode: effectiveLowLatencyMode,
       sensoryZoomEnabled,
       clicheDetectionEnabled,
-      reliableRibbonMode,
+      reliableRibbonMode: effectiveReliableRibbonMode,
       ribbonFilterModel: ribbonFilterModel.trim(),
       ribbonPauseSeconds: Math.min(10, Math.max(1, ribbonPauseSeconds)),
       ribbonSettings: {
@@ -864,12 +879,58 @@ export default function SettingsPage() {
                 </p>
               </div>
 
+              {/* Ribbon run profile */}
+              <div className="space-y-2 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
+                <div className="flex items-center justify-between gap-3">
+                  <label className="block font-medium text-sm text-[var(--color-ink)]">
+                    织带运行档
+                  </label>
+                  <span className="text-xs text-[var(--color-ink-faint)]">
+                    单选 · 用于避免互相冲突
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {[
+                    { value: 'balanced' as const, title: '均衡', desc: '日常使用，按开关生效' },
+                    { value: 'fast' as const, title: '低延迟', desc: '速度优先（自动关闭部分增强）' },
+                    { value: 'reliable' as const, title: '可靠（调试）', desc: '稳定优先（更长超时 + 可见占位）' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setRibbonRunProfile(opt.value)}
+                      className={`text-left px-3 py-2 border rounded-lg transition-colors ${
+                        ribbonRunProfile === opt.value
+                          ? 'border-[var(--color-ink)] bg-[var(--color-ink)]/10 text-[var(--color-ink)]'
+                          : 'border-[var(--color-border)] hover:border-[var(--color-ink-light)] text-[var(--color-ink)]'
+                      }`}
+                    >
+                      <div className="text-sm font-medium">{opt.title}</div>
+                      <div className="text-xs text-[var(--color-ink-faint)] mt-0.5 leading-relaxed">
+                        {opt.desc}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                {ribbonRunProfile === 'fast' && (
+                  <p className="text-xs text-[var(--color-ink-faint)] leading-relaxed">
+                    已启用低延迟：将<strong>强制关闭</strong>「智能扩展查询词」与「RAG 重排」以降低等待时间。
+                  </p>
+                )}
+                {ribbonRunProfile === 'reliable' && (
+                  <p className="text-xs text-[var(--color-ink-faint)] leading-relaxed">
+                    可靠（调试）档会优先确保你能看到产出：显示“生成中”占位卡、使用更长超时、并避免因探测失败而静默跳过模块。
+                  </p>
+                )}
+              </div>
+
               {/* Semantic expansion for RAG - optimized copy */}
               <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
                 <input
                   type="checkbox"
                   id="semanticExpansion"
                   checked={semanticExpansion}
+                  disabled={isFastProfile}
                   onChange={(e) => setSemanticExpansion(e.target.checked)}
                   className="mt-0.5 rounded border-[var(--color-border)]"
                 />
@@ -884,7 +945,9 @@ export default function SettingsPage() {
                     开启后，AI 会将「春天」扩展为「春天 花开 温暖 春风」等同义词再检索，能召回更多相关段落。
                     <span className="text-[var(--color-ink-light)]">适合：找不到相关内容时尝试开启。</span>
                     <br />
-                    <span className="text-[var(--color-accent)]">注意：会增加约 1-2 秒检索时间。</span>
+                    <span className="text-[var(--color-accent)]">
+                      注意：会增加约 1-2 秒检索时间。{isFastProfile ? '低延迟档已强制关闭。' : ''}
+                    </span>
                   </span>
                 </label>
               </div>
@@ -914,6 +977,7 @@ export default function SettingsPage() {
                   type="checkbox"
                   id="ragRerankEnabled"
                   checked={ragRerankEnabled}
+                  disabled={isFastProfile}
                   onChange={(e) => setRagRerankEnabled(e.target.checked)}
                   className="mt-0.5 rounded border-[var(--color-border)]"
                 />
@@ -925,29 +989,8 @@ export default function SettingsPage() {
                     </span>
                   </span>
                   <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
-                    多视角检索（全文/当前句/关键词）后，用模型对候选打分重排，提升相关性。低延迟模式下自动关闭。
-                  </span>
-                </label>
-              </div>
-
-              {/* Low latency mode */}
-              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
-                <input
-                  type="checkbox"
-                  id="lowLatencyMode"
-                  checked={lowLatencyMode}
-                  onChange={(e) => setLowLatencyMode(e.target.checked)}
-                  className="mt-0.5 rounded border-[var(--color-border)]"
-                />
-                <label htmlFor="lowLatencyMode" className="flex-1 cursor-pointer">
-                  <span className="block font-medium text-sm text-[var(--color-ink)]">
-                    低延迟模式
-                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
-                      {lowLatencyMode ? '已开启 · 速度优先' : '已关闭'}
-                    </span>
-                  </span>
-                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
-                    关闭查询扩展与 RAG 重排，减少约 2 秒延迟，适合对响应速度要求高的场景。
+                    多视角检索（全文/当前句/关键词）后，用模型对候选打分重排，提升相关性。
+                    {isFastProfile ? '低延迟档已强制关闭。' : ''}
                   </span>
                 </label>
               </div>
@@ -992,28 +1035,6 @@ export default function SettingsPage() {
                   </span>
                   <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
                     检测当前段落的陈词滥调，点击「套路语」从共鸣库获取非套路化替代表达。
-                  </span>
-                </label>
-              </div>
-
-              {/* Reliable ribbon mode */}
-              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
-                <input
-                  type="checkbox"
-                  id="reliableRibbonMode"
-                  checked={reliableRibbonMode}
-                  onChange={(e) => setReliableRibbonMode(e.target.checked)}
-                  className="mt-0.5 rounded border-[var(--color-border)]"
-                />
-                <label htmlFor="reliableRibbonMode" className="flex-1 cursor-pointer">
-                  <span className="block font-medium text-sm text-[var(--color-ink)]">
-                    织带可靠模式
-                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
-                      {reliableRibbonMode ? '已开启 · 稳定优先' : '已关闭'}
-                    </span>
-                  </span>
-                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
-                    用更长超时并显示“生成中”占位卡，优先确保看到实际产出（适合排查供应商/提示词问题，可能更慢）。
                   </span>
                 </label>
               </div>

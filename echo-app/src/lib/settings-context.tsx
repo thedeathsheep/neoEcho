@@ -18,6 +18,13 @@ export interface Settings {
   theme: 'light' | 'dark' | 'system'
   fontSize: 'small' | 'medium' | 'large'
   activeKnowledgeBaseId: string | null
+  /**
+   * Ribbon run profile (single-select).
+   * - balanced: normal behavior (user toggles apply)
+   * - fast: latency-first (forces some retrieval enhancements off)
+   * - reliable: debug profile (forces longer timeouts & avoids skipping)
+   */
+  ribbonRunProfile: 'balanced' | 'fast' | 'reliable'
   /** Use AI to expand query for RAG (e.g. "春天" -> "春天 花开 温暖 春风") for better semantic recall */
   semanticExpansion: boolean
   /** Use API for embeddings (better quality, especially for Chinese) */
@@ -73,6 +80,7 @@ const DEFAULT_SETTINGS: Settings = {
   theme: 'light',
   fontSize: 'medium',
   activeKnowledgeBaseId: null,
+  ribbonRunProfile: 'balanced',
   semanticExpansion: false,
   useEmbeddingApi: false,
   embeddingBaseUrl: '',
@@ -109,7 +117,23 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
       const saved = localStorage.getItem(STORAGE_KEY)
       if (saved) {
         const parsed = JSON.parse(saved)
-        const merged = { ...DEFAULT_SETTINGS, ...parsed }
+        const merged = {
+          ...DEFAULT_SETTINGS,
+          ...parsed,
+        } as Settings & {
+          ribbonRunProfile?: Settings['ribbonRunProfile']
+          lowLatencyMode?: boolean
+          reliableRibbonMode?: boolean
+        }
+        // Backward-compatible migration: derive ribbonRunProfile if missing.
+        if (!merged.ribbonRunProfile) {
+          if (merged.reliableRibbonMode) merged.ribbonRunProfile = 'reliable'
+          else if (merged.lowLatencyMode) merged.ribbonRunProfile = 'fast'
+          else merged.ribbonRunProfile = 'balanced'
+        }
+        // Keep legacy flags consistent for runtime reads.
+        merged.lowLatencyMode = merged.ribbonRunProfile === 'fast'
+        merged.reliableRibbonMode = merged.ribbonRunProfile === 'reliable'
         if (!merged.ribbonSettings?.slotCount || !Array.isArray(merged.ribbonSettings?.modules)) {
           merged.ribbonSettings = getDefaultRibbonSettings()
         } else {
