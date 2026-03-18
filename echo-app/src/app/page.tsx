@@ -673,11 +673,13 @@ export default function Home() {
 
   const handleEditorUpdate = useCallback(
     (text: string, blockId: string | null) => {
+      const prevText = lastTextRef.current
       lastTextRef.current = text
       currentBlockIdRef.current = blockId
       setCurrentBlockId(blockId)
-      // Don't start pause timer for empty/minimal content; avoids ribbon firing on new doc
-      if (text.trim().length >= 2) {
+      // Only start pause timer when the content actually changes.
+      // Selection/cursor moves trigger editor updates too; those should not refresh the ribbon.
+      if (text !== prevText && text.trim().length >= 2) {
         beat(text)
       }
     },
