@@ -33,6 +33,7 @@ import { ragService, generateCandidatesByViews, type MandatoryMaxSlots } from '@
 import {
   generateEchoes,
   generateEchoesForModule,
+  generateBatchEchoesForModules,
   probeChatCompletions,
   expandQueryForRAG,
   filterRibbonCandidates,
@@ -293,15 +294,14 @@ export default function Home() {
         (m: RibbonModuleConfig) =>
           (m.type || m.id || '').startsWith('ai:') && m.type !== 'rag' && m.type !== 'quick',
       )
+      const batchModules = [...aiModulesNeedRag, ...customModules]
       devLog.push('ribbon', 'module counts', {
         enabledTotal: enabledModules.length,
         aiNeedRag: aiModulesNeedRag.length,
         aiIds: aiModulesNeedRag.map((m) => m.id),
         hasApiKey: !!hasApiKey,
       })
-      const aiResultsByModuleId: Record<string, EchoItem[]> = {}
       const quickResultsByModuleId: Record<string, EchoItem[]> = {}
-      const customResultsByModuleId: Record<string, EchoItem[]> = {}
 
       // Probe chat endpoint once per refresh to avoid wasting time when provider is stalled.
       // In reliable mode, do not skip AI even if probe fails (we want real output for debugging).
@@ -383,6 +383,9 @@ export default function Home() {
         })
       })
 
+      // -------------------------
+      // Phase A: wait for RAG + Quick, render immediately.
+      // -------------------------
       const noRagPromises: Array<Promise<{ mod: RibbonModuleConfig; items: EchoItem[]; error?: string }>> = []
       if (hasApiKey && !aiProviderStalled && quickModules.length > 0) {
         noRagPromises.push(
@@ -409,76 +412,33 @@ export default function Home() {
           ),
         )
       }
+
       if (hasApiKey && aiProviderStalled && quickModules.length > 0) {
         noRagPromises.push(
           ...quickModules.map((mod) =>
-            Promise.resolve({ mod, items: [], error: 'AI 服务当前不可用（探针超时），已跳过生成' }),
-          ),
-        )
-      }
-      if (hasApiKey && !aiProviderStalled && customModules.length > 0) {
-        noRagPromises.push(
-          ...customModules.map((mod) =>
-            raceWithTimeout(
-              isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : RIBBON_MODULE_TIMEOUT_MS,
-              (async () => {
-                try {
-                  const result = await generateEchoesForModule(
-                    text,
-                    [],
-                    { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
-                    { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
-                    bid,
-                    { signal, timeoutMs: isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : undefined },
-                  )
-                  if (result.items.length === 0) {
-                    devLog.push('ribbon', 'custom module returned empty', {
-                      moduleId: mod.id,
-                      label: mod.label,
-                    })
-                  }
-                  return { mod, items: result.items }
-                } catch (err) {
-                  const errMsg = (err as Error).message
-                  devLog.push('ribbon', 'custom module error', {
-                    moduleId: mod.id,
-                    label: mod.label,
-                    error: errMsg,
-                  })
-                  return { mod, items: [], error: errMsg }
-                }
-              })(),
-              { mod, items: [], error: '请求超时' },
-            ),
-          ),
-        )
-      }
-      if (hasApiKey && aiProviderStalled && customModules.length > 0) {
-        noRagPromises.push(
-          ...customModules.map((mod) =>
-            Promise.resolve({ mod, items: [], error: 'AI 服务当前不可用（探针超时），已跳过生成' }),
+            Promise.resolve({ mod, items: [], error: 'AI 服务当前不可用（探针失败），已跳过生成' }),
           ),
         )
       }
 
       if (hasApiKey && (ragModule?.enabled || noRagPromises.length > 0)) {
         setAiStatus('loading')
-        devLog.push('ribbon', 'RAG + Quick + Custom (parallel)', {
+        devLog.push('ribbon', 'RAG + Quick (phaseA parallel)', {
           rag: !!ragModule?.enabled,
           quickCount: quickModules.length,
-          customCount: customModules.length,
+          batchCount: batchModules.length,
         })
       }
 
       const tJoinStart = Date.now()
-      debugIngest('H8', 'page.tsx:handlePause', 'await join (rag + noRag) start', {
+      debugIngest('H8', 'page.tsx:handlePause', 'await join (rag + quick) start', {
         noRagPromises: noRagPromises.length,
       })
       const [ragResults, ...noRagResultsList] = await Promise.all([ragPromise, ...noRagPromises])
-      debugIngest('H8', 'page.tsx:handlePause', 'await join (rag + noRag) done', {
+      debugIngest('H8', 'page.tsx:handlePause', 'await join (rag + quick) done', {
         ms: Date.now() - tJoinStart,
         ragCount: ragResults.length,
-        noRagCount: noRagResultsList.length,
+        quickCount: noRagResultsList.length,
       })
 
       if (!isCurrentRequest()) return
@@ -491,148 +451,7 @@ export default function Home() {
         devLog.push('ribbon', 'RAG done', { count: ragResultsOrdered.length })
       }
       noRagResultsList.forEach(({ mod, items }) => {
-        if (mod.type === 'quick') {
-          quickResultsByModuleId[mod.id] = items
-        } else {
-          customResultsByModuleId[mod.id] = items
-        }
-      })
-      if (noRagResultsList.length > 0) {
-        devLog.push('ribbon', 'Quick + Custom done', {
-          quick: Object.fromEntries(Object.entries(quickResultsByModuleId).map(([k, v]) => [k, v.length])),
-          custom: Object.fromEntries(Object.entries(customResultsByModuleId).map(([k, v]) => [k, v.length])),
-        })
-      }
-
-      const ragFixedCount =
-        mandatoryBookIds.length > 0 && ragModule?.enabled
-          ? Math.min(mandatoryMaxSlots, mandatoryBookIds.length)
-          : 0
-      const fixedPool: EchoItem[] = ragResultsOrdered.slice(0, ragFixedCount)
-      noRagResultsList.forEach(({ mod, items }) => {
-        if (mod.pinned && items.length > 0) {
-          fixedPool.push(items[0])
-        }
-      })
-
-      let aiResultsList: ModuleResult[] = []
-      if (hasApiKey && aiProviderStalled && aiModulesNeedRag.length > 0) {
-        aiResultsList = aiModulesNeedRag.map((mod) => ({
-          mod,
-          items: [],
-          error: 'AI 服务当前不可用（探针超时），已跳过生成',
-        }))
-      } else if (hasApiKey && !aiProviderStalled && aiModulesNeedRag.length > 0) {
-        setAiStatus('loading')
-        devLog.push('ribbon', 'AI modules (need RAG) start', { count: aiModulesNeedRag.length })
-        // Preprocess RAG context ONCE per refresh (shared across all AI modules)
-        const tRagPre = Date.now()
-        let ragForAi = ragResultsOrdered
-        try {
-          // Keep this step fast: prioritize summarization; if it can't finish quickly, fall back to raw.
-          ragForAi = await raceWithTimeout(
-            2500,
-            summarizeRagChunks(ragResultsOrdered, settings, signal),
-            ragResultsOrdered,
-          )
-        } catch {
-          // ignore and fall back to raw
-          ragForAi = ragResultsOrdered
-        }
-        devLog.push('ribbon', 'RAG preprocess for AI (shared)', { ms: Date.now() - tRagPre })
-
-        // Non-reliable mode: run AI modules sequentially to reduce provider queue contention.
-        // This avoids "both requests time out at ~12s" when the upstream is slow.
-        if (isReliable) {
-          const aiPromises = aiModulesNeedRag.map((mod) =>
-            raceWithTimeout(
-              RIBBON_MODULE_TIMEOUT_RELIABLE_MS,
-              (async () => {
-                try {
-                  const result = await generateEchoesForModule(
-                    text,
-                    ragForAi,
-                    { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
-                    { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
-                    bid,
-                    { skipRagPreprocess: true, signal, timeoutMs: RIBBON_MODULE_TIMEOUT_RELIABLE_MS },
-                  )
-                  return { mod, items: result.items }
-                } catch (err) {
-                  return { mod, items: [], error: (err as Error).message }
-                }
-              })(),
-              { mod, items: [], error: '请求超时' },
-            ),
-          )
-          aiResultsList = await Promise.all(aiPromises)
-        } else {
-          aiResultsList = []
-          for (const mod of aiModulesNeedRag) {
-            const next = await raceWithTimeout(
-              RIBBON_MODULE_TIMEOUT_MS,
-              (async () => {
-                try {
-                  const result = await generateEchoesForModule(
-                    text,
-                    ragForAi,
-                    { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
-                    { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
-                    bid,
-                    { skipRagPreprocess: true, signal },
-                  )
-                  return { mod, items: result.items }
-                } catch (err) {
-                  return { mod, items: [], error: (err as Error).message }
-                }
-              })(),
-              { mod, items: [], error: '请求超时' },
-            )
-            aiResultsList.push(next as { mod: RibbonModuleConfig; items: EchoItem[]; error?: string })
-          }
-        }
-        aiResultsList.forEach(({ mod, items }) => {
-          aiResultsByModuleId[mod.id] = items
-          if (mod.pinned && items.length > 0) {
-            fixedPool.push(items[0])
-          }
-        })
-        setAiStatus('connected')
-        devLog.push('ribbon', 'AI modules done', {
-          byModule: Object.fromEntries(
-            Object.entries(aiResultsByModuleId).map(([k, v]) => [k, v.length]),
-          ),
-        })
-      }
-
-      if (!isCurrentRequest()) return
-
-      // Build module results for allocator: RAG slice with diversity (same doc ≤2 consecutive), rest unchanged
-      const ragNonFixed = selectDiverseRagForRibbon(
-        ragResultsOrdered.slice(ragFixedCount),
-        slotCount,
-      )
-      const allModuleResults: ModuleResult[] = [
-        ...(ragModule?.enabled && ragNonFixed.length > 0
-          ? [{ mod: ragModule, items: ragNonFixed } as ModuleResult]
-          : []),
-        ...noRagResultsList.map((r) => ({ mod: r.mod, items: r.items, error: (r as { error?: string }).error })),
-        ...aiResultsList.map((r) => ({ mod: r.mod, items: r.items, error: (r as { error?: string }).error })),
-      ]
-
-      const { items: allocatedItems, placeholders } = allocateSlots(
-        allModuleResults,
-        slotCount,
-        allocationMode,
-        fixedPool,
-      )
-
-      const final = allocatedItems
-      devLog.push('ribbon', 'allocation', {
-        mode: allocationMode,
-        fixedCount: fixedPool.length,
-        allocatedCount: allocatedItems.length,
-        placeholderCount: placeholders.length,
+        if (mod.type === 'quick') quickResultsByModuleId[mod.id] = items
       })
 
       const applyRibbonUpdate = (nextList: EchoItem[]) => {
@@ -642,6 +461,140 @@ export default function Home() {
           setSelectedRibbonEcho(null)
         }
       }
+
+      const tPhaseA = Date.now()
+      const ragFixedCount =
+        mandatoryBookIds.length > 0 && ragModule?.enabled
+          ? Math.min(mandatoryMaxSlots, mandatoryBookIds.length)
+          : 0
+
+      const fixedPoolA: EchoItem[] = ragResultsOrdered.slice(0, ragFixedCount)
+      noRagResultsList.forEach(({ mod, items }) => {
+        if (mod.pinned && items.length > 0) fixedPoolA.push(items[0])
+      })
+
+      const ragNonFixedA = selectDiverseRagForRibbon(
+        ragResultsOrdered.slice(ragFixedCount),
+        slotCount,
+      )
+
+      const moduleResultsA: ModuleResult[] = [
+        ...(ragModule?.enabled && ragNonFixedA.length > 0
+          ? [{ mod: ragModule, items: ragNonFixedA } as ModuleResult]
+          : []),
+        ...noRagResultsList.map((r) => ({ mod: r.mod, items: r.items, error: (r as { error?: string }).error })),
+      ]
+
+      const { items: allocatedItemsA, placeholders: placeholdersA } = allocateSlots(
+        moduleResultsA,
+        slotCount,
+        allocationMode,
+        fixedPoolA,
+      )
+
+      const loadingBatchPlaceholders = createLoadingPlaceholders(batchModules)
+      setDisplayEchoes(allocatedItemsA)
+      setDisplayPlaceholders([...loadingBatchPlaceholders, ...placeholdersA])
+      setBatchKey((k) => k + 1)
+
+      devLog.push('ribbon', 'Phase A rendered', {
+        ms: Date.now() - tPhaseA,
+        echoCount: allocatedItemsA.length,
+        batchLoadingCount: loadingBatchPlaceholders.length,
+      })
+
+      if (!isCurrentRequest()) return
+
+      // -------------------------
+      // Phase B: one-call batch generation for ai:* + custom.
+      // -------------------------
+      let ragForAi = ragResultsOrdered
+      const tRagPre = Date.now()
+      try {
+        ragForAi = await raceWithTimeout(
+          2500,
+          summarizeRagChunks(ragResultsOrdered, settings, signal),
+          ragResultsOrdered,
+        )
+      } catch {
+        ragForAi = ragResultsOrdered
+      }
+      devLog.push('ribbon', 'RAG preprocess for batch (shared)', { ms: Date.now() - tRagPre })
+
+      const batchTimeoutMs = isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : RIBBON_MODULE_TIMEOUT_MS
+      const skipMessage = 'AI 服务当前不可用（探针失败），已跳过生成'
+
+      let batchError: string | undefined
+      let batchByModuleId: Record<string, EchoItem[]> = {}
+
+      if (hasApiKey && batchModules.length > 0) {
+        if (aiProviderStalled) {
+          batchError = skipMessage
+          devLog.push('ribbon', 'batch skipped due to aiProviderStalled', { batchCount: batchModules.length })
+        } else {
+          try {
+            devLog.push('ribbon', 'batch generation start', { batchCount: batchModules.length, timeoutMs: batchTimeoutMs })
+            const tBatch = Date.now()
+            const batchRes = await generateBatchEchoesForModules(
+              text,
+              ragForAi,
+              { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
+              batchModules.map((m) => ({ type: m.type, id: m.id, prompt: m.prompt, model: m.model })),
+              bid,
+              { signal, timeoutMs: batchTimeoutMs },
+            )
+            batchByModuleId = batchRes.byModuleId
+            devLog.push('ribbon', 'batch generation done', {
+              ms: Date.now() - tBatch,
+              byModule: Object.fromEntries(Object.entries(batchByModuleId).map(([k, v]) => [k, v.length])),
+            })
+          } catch (err) {
+            batchError = (err as Error)?.message ?? 'batch generation failed'
+            devLog.push('ribbon', 'batch generation error', { error: batchError })
+          }
+        }
+      }
+
+      const fixedPoolB: EchoItem[] = ragResultsOrdered.slice(0, ragFixedCount)
+      noRagResultsList.forEach(({ mod, items }) => {
+        if (mod.pinned && items.length > 0) fixedPoolB.push(items[0])
+      })
+      for (const mod of batchModules) {
+        const items = batchByModuleId[mod.id] ?? []
+        if (mod.pinned && items.length > 0) fixedPoolB.push(items[0])
+      }
+
+      const ragNonFixedB = selectDiverseRagForRibbon(
+        ragResultsOrdered.slice(ragFixedCount),
+        slotCount,
+      )
+      const moduleResultsB: ModuleResult[] = [
+        ...(ragModule?.enabled && ragNonFixedB.length > 0
+          ? [{ mod: ragModule, items: ragNonFixedB } as ModuleResult]
+          : []),
+        ...noRagResultsList.map((r) => ({ mod: r.mod, items: r.items, error: (r as { error?: string }).error })),
+        ...batchModules.map((mod) => ({
+          mod,
+          items: batchByModuleId[mod.id] ?? [],
+          error: batchError,
+        })),
+      ]
+
+      if (!isCurrentRequest()) return
+
+      const { items: final, placeholders } = allocateSlots(
+        moduleResultsB,
+        slotCount,
+        allocationMode,
+        fixedPoolB,
+      )
+
+      devLog.push('ribbon', 'allocation (phaseB)', {
+        mode: allocationMode,
+        fixedCount: fixedPoolB.length,
+        allocatedCount: final.length,
+        placeholderCount: placeholders.length,
+      })
 
       if (final.length > 0 && documentId) {
         devLog.push('ribbon', 'setDisplayEchoes (final)', {
@@ -654,8 +607,7 @@ export default function Home() {
         setBatchKey((k) => k + 1)
         lastRefreshedTextRef.current = text
         lastRefreshHadErrorsRef.current =
-          placeholders.length > 0 ||
-          allModuleResults.some((r) => !!(r as { error?: string }).error)
+          placeholders.length > 0 || moduleResultsB.some((r) => !!(r as { error?: string }).error)
         applyRibbonUpdate(final)
       } else if (ragResultsOrdered.length > 0 && documentId) {
         const fallback = ragResultsOrdered.slice(0, slotCount)
@@ -668,7 +620,6 @@ export default function Home() {
         setDisplayPlaceholders([])
         setBatchKey((k) => k + 1)
         lastRefreshedTextRef.current = text
-        // Fallback means some modules failed or were empty; allow retry on same text.
         lastRefreshHadErrorsRef.current = true
         applyRibbonUpdate(fallback)
       }

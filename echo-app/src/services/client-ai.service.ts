@@ -965,3 +965,146 @@ export async function generateEchoesForModule(
 
   return { items, usedRag }
 }
+
+/**
+ * Batch generate ribbon items for multiple modules in one chat request.
+ *
+ * Notes:
+ * - Intended for `ai:*` + `custom` modules (quick modules are excluded).
+ * - For `custom` modules we follow the existing non-RAG path: do NOT inject RAG context.
+ * - For `ai:*` modules we inject the provided `ragForAi`.
+ * - Output is strict JSON to keep parsing reliable.
+ */
+export async function generateBatchEchoesForModules(
+  context: string,
+  ragForAi: EchoItem[],
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model' | 'ribbonFilterModel'>,
+  modules: Array<{ type: RibbonModuleType; id: string; prompt?: string; model?: string }>,
+  blockId?: string,
+  options?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<{ byModuleId: Record<string, EchoItem[]> }> {
+  const apiKey = settings.apiKey
+  if (!apiKey || modules.length === 0) return { byModuleId: {} }
+
+  const allowedModules = modules.filter((m) => m.type.startsWith('ai:') || m.type === 'custom')
+  if (allowedModules.length === 0) return { byModuleId: {} }
+
+  const maxTokens = 768
+  const timeoutMs = options?.timeoutMs ?? 12_000
+
+  const moduleSections = allowedModules
+    .map((m) => {
+      const sourceLabel = getModuleDisplayLabel(m.type, m.id)
+      const mode = ribbonTypeToAIMode(m.type)
+      const ragForPrompt = m.type.startsWith('ai:') ? ragForAi : []
+
+      const systemPrompt = getSystemPromptForRibbonModule(m.type, m.id, m.prompt)
+      const userPrompt = buildUserPromptByMode(context, ragForPrompt, mode)
+
+      // The model must follow "module-specific system prompt + user prompt" inside this section.
+      return `MODULE_ID: ${m.id}
+MODULE_TYPE: ${m.type}
+MODULE_SOURCE_LABEL: ${sourceLabel}
+MODULE_SYSTEM_PROMPT:
+${systemPrompt}
+MODULE_USER_PROMPT:
+${userPrompt}`
+    })
+    .join('\n\n')
+
+  const outputSchema = `Output ONLY valid JSON:
+{
+  "results": {
+    "<moduleId>": ["line1", "line2", "line3", "line4", "line5"]
+  }
+}
+Rules:
+- keys must be moduleIds exactly as provided (strings)
+- arrays must contain 0-5 strings
+- each string must be a single short line (no numbering, no extra explanations)
+- do not wrap JSON in markdown fences`
+
+  const start = Date.now()
+  const res = await fetch(apiUrl(settings.baseUrl, '/chat/completions'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: settings.model,
+      messages: [
+        { role: 'system', content: 'You generate multi-module ribbon items.' },
+        {
+          role: 'user',
+          content:
+            `Context text:\n${context}\n\n` +
+            `You will be given module sections. Each module section includes a module-specific system prompt and a module-specific user prompt.\n` +
+            `Follow each module section independently and output results only in the JSON schema.\n\n` +
+            moduleSections +
+            '\n\n' +
+            outputSchema,
+        },
+      ],
+      temperature: 0.4,
+      max_tokens: maxTokens,
+    }),
+    signal: withTimeout(options?.signal, timeoutMs),
+  })
+
+  const elapsedMs = Date.now() - start
+  devLog.push('ai', 'generateBatchEchoesForModules response', {
+    elapsedMs,
+    modulesCount: allowedModules.length,
+    status: res.status,
+  })
+
+  if (!res.ok) {
+    throw new Error(`API request failed (${res.status})`)
+  }
+
+  const data = (await res.json()) as ChatCompletionResponse
+  const raw = (data.choices?.[0]?.message?.content ?? '').trim()
+
+  const extractJson = (s: string): string => {
+    const startIdx = s.indexOf('{')
+    const endIdx = s.lastIndexOf('}')
+    if (startIdx >= 0 && endIdx > startIdx) return s.slice(startIdx, endIdx + 1)
+    return s
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(extractJson(raw))
+  } catch {
+    devLog.push('ai', 'generateBatchEchoesForModules JSON parse failed', {
+      preview: raw.slice(0, 120),
+    })
+    throw new Error('batch parse failed')
+  }
+
+  const byModuleId: Record<string, EchoItem[]> = {}
+  const results = (parsed as { results?: Record<string, unknown> }).results
+  if (!results || typeof results !== 'object') {
+    throw new Error('batch parse failed')
+  }
+
+  for (let i = 0; i < allowedModules.length; i++) {
+    const m = allowedModules[i]
+    const arr = (results as Record<string, unknown>)[m.id]
+    const lines = Array.isArray(arr) ? arr.filter((x) => typeof x === 'string').map((x) => (x as string).trim()) : []
+    const usable = lines.filter((x) => x.length > 0).slice(0, 5)
+
+    const sourceLabel = getModuleDisplayLabel(m.type, m.id)
+    byModuleId[m.id] = usable.map((content, idx) => ({
+      id: `ai-batch-${m.type}-${m.id}-${Date.now()}-${idx}`,
+      type: 'lit',
+      content,
+      source: sourceLabel,
+      blockId,
+      createdAt: new Date().toISOString(),
+    }))
+  }
+
+  return { byModuleId }
+}
