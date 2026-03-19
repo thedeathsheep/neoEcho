@@ -541,28 +541,56 @@ export default function Home() {
         }
         devLog.push('ribbon', 'RAG preprocess for AI (shared)', { ms: Date.now() - tRagPre })
 
-        const aiPromises = aiModulesNeedRag.map((mod) =>
-          raceWithTimeout(
-            isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : RIBBON_MODULE_TIMEOUT_MS,
-            (async () => {
-              try {
-                const result = await generateEchoesForModule(
-                  text,
-                  ragForAi,
-                  { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
-                  { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
-                  bid,
-                  { skipRagPreprocess: true, signal, timeoutMs: isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : undefined },
-                )
-                return { mod, items: result.items }
-              } catch (err) {
-                return { mod, items: [], error: (err as Error).message }
-              }
-            })(),
-            { mod, items: [], error: '请求超时' },
-          ),
-        )
-        aiResultsList = await Promise.all(aiPromises)
+        // Non-reliable mode: run AI modules sequentially to reduce provider queue contention.
+        // This avoids "both requests time out at ~12s" when the upstream is slow.
+        if (isReliable) {
+          const aiPromises = aiModulesNeedRag.map((mod) =>
+            raceWithTimeout(
+              RIBBON_MODULE_TIMEOUT_RELIABLE_MS,
+              (async () => {
+                try {
+                  const result = await generateEchoesForModule(
+                    text,
+                    ragForAi,
+                    { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
+                    { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
+                    bid,
+                    { skipRagPreprocess: true, signal, timeoutMs: RIBBON_MODULE_TIMEOUT_RELIABLE_MS },
+                  )
+                  return { mod, items: result.items }
+                } catch (err) {
+                  return { mod, items: [], error: (err as Error).message }
+                }
+              })(),
+              { mod, items: [], error: '请求超时' },
+            ),
+          )
+          aiResultsList = await Promise.all(aiPromises)
+        } else {
+          aiResultsList = []
+          for (const mod of aiModulesNeedRag) {
+            const next = await raceWithTimeout(
+              RIBBON_MODULE_TIMEOUT_MS,
+              (async () => {
+                try {
+                  const result = await generateEchoesForModule(
+                    text,
+                    ragForAi,
+                    { apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model, ribbonFilterModel: settings.ribbonFilterModel ?? '' },
+                    { type: mod.type, id: mod.id, prompt: mod.prompt, model: mod.model },
+                    bid,
+                    { skipRagPreprocess: true, signal },
+                  )
+                  return { mod, items: result.items }
+                } catch (err) {
+                  return { mod, items: [], error: (err as Error).message }
+                }
+              })(),
+              { mod, items: [], error: '请求超时' },
+            )
+            aiResultsList.push(next as { mod: RibbonModuleConfig; items: EchoItem[]; error?: string })
+          }
+        }
         aiResultsList.forEach(({ mod, items }) => {
           aiResultsByModuleId[mod.id] = items
           if (mod.pinned && items.length > 0) {
