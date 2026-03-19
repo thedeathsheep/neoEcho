@@ -308,13 +308,18 @@ export default function Home() {
       const probe = hasApiKey
         ? await probeChatCompletions({ apiKey: settings.apiKey, baseUrl: settings.baseUrl, model: settings.model }, signal)
         : { ok: false, elapsedMs: 0 }
-      const aiProviderStalled = !isReliable && hasApiKey && !probe.ok
+      // Important: probe may time out due to slowness, not because the provider is fully stalled.
+      // If we treat probe timeouts as "stalled" we will incorrectly skip AI/custom modules.
+      const isProbeTimeout =
+        typeof probe.error === 'string' && probe.error.toLowerCase().includes('timed out')
+      const aiProviderStalled = !isReliable && hasApiKey && !probe.ok && !isProbeTimeout
       debugIngest('H6', 'page.tsx:handlePause', 'probe result', { ...probe, aiProviderStalled, isReliable })
       if (hasApiKey && !probe.ok) {
         devLog.push('ribbon', 'probe failed, AI/custom may be skipped', {
           ok: probe.ok,
           elapsedMs: probe.elapsedMs,
           error: probe.error,
+          isProbeTimeout,
           aiProviderStalled,
           isReliable,
         })
