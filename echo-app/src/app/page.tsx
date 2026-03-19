@@ -61,6 +61,8 @@ const DISPLAY_BATCH_KEY = 'echo-display-batch'
 /** Max wait per ribbon module so one slow module does not block the whole refresh. */
 const RIBBON_MODULE_TIMEOUT_MS = 12_000
 const RIBBON_MODULE_TIMEOUT_RELIABLE_MS = 60_000
+/** Batch (one-call) AI/custom timeout in normal mode. */
+const BATCH_MODULE_TIMEOUT_MS = 20_000
 
 function debugIngest(hypothesisId: string, location: string, message: string, data: Record<string, unknown>) {
   // #region agent log
@@ -244,10 +246,8 @@ export default function Home() {
       ...savedModules.filter((m: RibbonModuleConfig) => m.type === 'custom'),
     ]
     const enabledModules = allModules.filter((m: RibbonModuleConfig) => m.enabled)
-    // Show loading placeholders immediately for visibility (reliable mode only).
-    if (isReliable) {
-      setDisplayPlaceholders(createLoadingPlaceholders(enabledModules))
-    }
+    // Do not render "loading..." placeholders in normal flow;
+    // placeholders should only show failures/empties.
 
     const shuffle = <T,>(arr: T[]): T[] => {
       const out = [...arr]
@@ -492,15 +492,14 @@ export default function Home() {
         fixedPoolA,
       )
 
-      const loadingBatchPlaceholders = createLoadingPlaceholders(batchModules)
       setDisplayEchoes(allocatedItemsA)
-      setDisplayPlaceholders([...loadingBatchPlaceholders, ...placeholdersA])
+      setDisplayPlaceholders(placeholdersA)
       setBatchKey((k) => k + 1)
 
       devLog.push('ribbon', 'Phase A rendered', {
         ms: Date.now() - tPhaseA,
         echoCount: allocatedItemsA.length,
-        batchLoadingCount: loadingBatchPlaceholders.length,
+        batchLoadingCount: 0,
       })
 
       if (!isCurrentRequest()) return
@@ -521,7 +520,7 @@ export default function Home() {
       }
       devLog.push('ribbon', 'RAG preprocess for batch (shared)', { ms: Date.now() - tRagPre })
 
-      const batchTimeoutMs = isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : RIBBON_MODULE_TIMEOUT_MS
+      const batchTimeoutMs = isReliable ? RIBBON_MODULE_TIMEOUT_RELIABLE_MS : BATCH_MODULE_TIMEOUT_MS
       const skipMessage = 'AI 服务当前不可用（探针失败），已跳过生成'
 
       let batchError: string | undefined

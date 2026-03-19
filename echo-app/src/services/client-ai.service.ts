@@ -989,7 +989,7 @@ export async function generateBatchEchoesForModules(
   const allowedModules = modules.filter((m) => m.type.startsWith('ai:') || m.type === 'custom')
   if (allowedModules.length === 0) return { byModuleId: {} }
 
-  const maxTokens = 768
+  const maxTokens = Math.min(512, Math.max(256, allowedModules.length * 160))
   const timeoutMs = options?.timeoutMs ?? 12_000
 
   const moduleSections = allowedModules
@@ -1046,7 +1046,7 @@ Rules:
             outputSchema,
         },
       ],
-      temperature: 0.4,
+      temperature: 0.25,
       max_tokens: maxTokens,
     }),
     signal: withTimeout(options?.signal, timeoutMs),
