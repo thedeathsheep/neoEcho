@@ -310,6 +310,15 @@ export default function Home() {
         : { ok: false, elapsedMs: 0 }
       const aiProviderStalled = !isReliable && hasApiKey && !probe.ok
       debugIngest('H6', 'page.tsx:handlePause', 'probe result', { ...probe, aiProviderStalled, isReliable })
+      if (hasApiKey && !probe.ok) {
+        devLog.push('ribbon', 'probe failed, AI/custom may be skipped', {
+          ok: probe.ok,
+          elapsedMs: probe.elapsedMs,
+          error: probe.error,
+          aiProviderStalled,
+          isReliable,
+        })
+      }
 
       // RAG: multi-view + rerank when enabled and not low-latency; else legacy search
       const useRerankPipeline = ragModule?.enabled && activeBase?.id && settings.ragRerankEnabled && !settings.lowLatencyMode && hasApiKey

@@ -169,6 +169,11 @@ function PlaceholderFragment({
           <p className="text-sm leading-snug font-serif text-[var(--color-ink-faint)]">
             {item.status === 'loading' ? '加载中...' : item.status === 'error' ? '生成失败' : '无内容'}
           </p>
+          {item.status === 'error' && item.message && (
+            <p className="text-[10px] text-[var(--color-ink-faint)]/80 mt-0.5 leading-tight max-w-[12rem] truncate" title={item.message}>
+              {item.message}
+            </p>
+          )}
           <span className="text-[9px] tracking-wider text-[var(--color-ink-faint)]/50">
             {item.moduleLabel}
           </span>
