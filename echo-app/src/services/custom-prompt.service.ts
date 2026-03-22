@@ -9,6 +9,22 @@ import type { CustomPrompt } from '@/types'
 const STORAGE_KEY = 'echo-custom-prompts'
 const ACTIVE_PROMPT_ID_KEY = 'echo-active-custom-prompt-id'
 
+function normalizePrompt(prompt: CustomPrompt): CustomPrompt {
+  const behavior = prompt.behavior ?? 'freeform'
+  const mode = prompt.mode ?? 'ambient'
+  const outputShape = prompt.outputShape ?? (behavior === 'entity_explain' ? 'paragraph' : 'short_lines')
+
+  return {
+    ...prompt,
+    mode,
+    behavior,
+    outputShape,
+    // Default to user-context-only generation unless the author explicitly opts into RAG.
+    useRag: prompt.useRag ?? false,
+    ragFallback: prompt.ragFallback ?? false,
+  }
+}
+
 const DEFAULT_PROMPTS: CustomPrompt[] = [
   {
     id: 'default-creative',
@@ -23,8 +39,10 @@ const DEFAULT_PROMPTS: CustomPrompt[] = [
 - 风格：开放、启发性、富有想象力`,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    useRag: true,
-    ragFallback: true,
+    mode: 'ambient',
+    outputShape: 'short_lines',
+    useRag: false,
+    ragFallback: false,
   },
   {
     id: 'default-poetry',
@@ -39,8 +57,10 @@ const DEFAULT_PROMPTS: CustomPrompt[] = [
 - 风格：诗意、凝练、富有音乐感`,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    useRag: true,
-    ragFallback: true,
+    mode: 'ambient',
+    outputShape: 'short_lines',
+    useRag: false,
+    ragFallback: false,
   },
   {
     id: 'default-academic',
@@ -55,8 +75,10 @@ const DEFAULT_PROMPTS: CustomPrompt[] = [
 - 风格：严谨、专业、客观`,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    useRag: true,
-    ragFallback: true,
+    mode: 'ambient',
+    outputShape: 'short_lines',
+    useRag: false,
+    ragFallback: false,
   },
 ]
 
@@ -64,22 +86,23 @@ const DEFAULT_PROMPTS: CustomPrompt[] = [
  * Load all custom prompts from localStorage
  */
 function loadPrompts(): CustomPrompt[] {
-  if (typeof window === 'undefined') return DEFAULT_PROMPTS
+  if (typeof window === 'undefined') return DEFAULT_PROMPTS.map(normalizePrompt)
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) {
       // First time: save default prompts
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(DEFAULT_PROMPTS))
+      const normalizedDefaults = DEFAULT_PROMPTS.map(normalizePrompt)
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizedDefaults))
       localStorage.setItem(ACTIVE_PROMPT_ID_KEY, DEFAULT_PROMPTS[0].id)
-      return DEFAULT_PROMPTS
+      return normalizedDefaults
     }
     const parsed = JSON.parse(raw)
     if (!Array.isArray(parsed) || parsed.length === 0) {
-      return DEFAULT_PROMPTS
+      return DEFAULT_PROMPTS.map(normalizePrompt)
     }
-    return parsed
+    return parsed.map((prompt) => normalizePrompt(prompt as CustomPrompt))
   } catch {
-    return DEFAULT_PROMPTS
+    return DEFAULT_PROMPTS.map(normalizePrompt)
   }
 }
 
@@ -169,20 +192,27 @@ export function createPrompt(
   name: string,
   content: string,
   description?: string,
+  mode?: CustomPrompt['mode'],
+  behavior?: CustomPrompt['behavior'],
+  outputShape?: CustomPrompt['outputShape'],
   useRag?: boolean,
   ragFallback?: boolean,
 ): CustomPrompt {
   const now = new Date().toISOString()
-  const newPrompt: CustomPrompt = {
+  const resolvedMode = mode ?? 'ambient'
+  const newPrompt: CustomPrompt = normalizePrompt({
     id: generateId(),
     name: name.trim() || '未命名提示词',
     content: content.trim(),
     description: description?.trim(),
     createdAt: now,
     updatedAt: now,
-    useRag: useRag ?? true,
-    ragFallback: ragFallback ?? true,
-  }
+    mode: resolvedMode,
+    behavior,
+    outputShape: outputShape ?? (resolvedMode === 'detail' ? 'paragraph' : 'short_lines'),
+    useRag: useRag ?? false,
+    ragFallback: ragFallback ?? false,
+  })
 
   const prompts = loadPrompts()
   prompts.push(newPrompt)
@@ -208,11 +238,11 @@ export function updatePrompt(
 
   if (index === -1) return null
 
-  prompts[index] = {
+  prompts[index] = normalizePrompt({
     ...prompts[index],
     ...updates,
     updatedAt: new Date().toISOString(),
-  }
+  })
 
   savePrompts(prompts)
   return prompts[index]
@@ -255,6 +285,11 @@ export function duplicatePrompt(id: string): CustomPrompt | null {
     `${prompt.name} (复制)`,
     prompt.content,
     prompt.description,
+    prompt.mode,
+    prompt.behavior,
+    prompt.outputShape,
+    prompt.useRag,
+    prompt.ragFallback,
   )
 }
 
@@ -262,7 +297,7 @@ export function duplicatePrompt(id: string): CustomPrompt | null {
  * Reset to default prompts
  */
 export function resetToDefaults(): void {
-  savePrompts(DEFAULT_PROMPTS)
+  savePrompts(DEFAULT_PROMPTS.map(normalizePrompt))
   setActivePromptId(DEFAULT_PROMPTS[0].id)
 }
 
@@ -291,7 +326,7 @@ export function importPrompts(jsonString: string): boolean {
 
     if (!valid) return false
 
-    savePrompts(parsed)
+    savePrompts(parsed.map((prompt) => normalizePrompt(prompt as CustomPrompt)))
     return true
   } catch {
     return false

@@ -1,14 +1,19 @@
 'use client'
 
-import { useEditor, EditorContent } from '@tiptap/react'
-import StarterKit from '@tiptap/starter-kit'
 import Placeholder from '@tiptap/extension-placeholder'
-import { useCallback, useEffect, useRef } from 'react'
+import { EditorContent, useEditor } from '@tiptap/react'
+import StarterKit from '@tiptap/starter-kit'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from 'react'
 
 import { NodeIdExtension } from './node-id-extension'
 
+export interface EchoEditorHandle {
+  focusBlock: (blockId: string) => boolean
+}
+
 interface EchoEditorProps {
   initialContent?: string
+  contentVersion?: number
   onUpdate?: (text: string, blockId: string | null) => void
   onContentChange?: (html: string) => void
   onSave?: () => void
@@ -21,8 +26,13 @@ interface EchoEditorProps {
   onParagraphChange?: (paragraphText: string, from: number, to: number) => void
 }
 
-export function EchoEditor({
+function escapeNodeId(blockId: string): string {
+  return blockId.replace(/["\\]/g, '\\$&')
+}
+
+export const EchoEditor = forwardRef<EchoEditorHandle, EchoEditorProps>(function EchoEditor({
   initialContent = '',
+  contentVersion = 0,
   onUpdate,
   onContentChange,
   onSave,
@@ -30,7 +40,7 @@ export function EchoEditor({
   onSelectionChange,
   onSensoryZoom,
   onParagraphChange,
-}: EchoEditorProps) {
+}: EchoEditorProps, ref) {
   const handleUpdate = useCallback(
     ({
       editor,
@@ -111,18 +121,54 @@ export function EchoEditor({
   // Track if initial content has been reported to prevent unnecessary updates
   const hasReportedInitialContent = useRef(false)
 
+  useImperativeHandle(
+    ref,
+    () => ({
+      focusBlock(blockId: string) {
+        if (!editor || editor.isDestroyed || !blockId) return false
+
+        let position: number | null = null
+        editor.state.doc.descendants((node, pos) => {
+          if ((node.attrs as { nodeId?: string } | undefined)?.nodeId === blockId) {
+            position = pos + 1
+            return false
+          }
+          return true
+        })
+
+        if (position === null) return false
+
+        editor.chain().focus(position).setTextSelection(position).run()
+        requestAnimationFrame(() => {
+          const element = editor.view.dom.querySelector(
+            `[data-node-id="${escapeNodeId(blockId)}"]`,
+          ) as HTMLElement | null
+          element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        })
+        return true
+      },
+    }),
+    [editor],
+  )
+
   useEffect(() => {
     if (editor && !editor.isDestroyed && !hasReportedInitialContent.current) {
       hasReportedInitialContent.current = true
       // Only report content change (for save), don't trigger ribbon update
-      const nodeId = editor.state.selection.$anchor.parent.attrs.nodeId ?? null
       onContentChange?.(editor.getHTML())
     }
   }, [editor, onContentChange])
+
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return
+    const nextContent = initialContent || ''
+    if (editor.getHTML() === nextContent) return
+    editor.commands.setContent(nextContent, { emitUpdate: false })
+  }, [contentVersion, editor, initialContent])
 
   return (
     <div className="w-full max-w-2xl mx-auto min-h-[50vh]">
       <EditorContent editor={editor} />
     </div>
   )
-}
+})

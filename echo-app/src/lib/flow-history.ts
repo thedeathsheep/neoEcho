@@ -45,6 +45,51 @@ function storageKey(documentId: string) {
   return `${PREFIX}${documentId}`
 }
 
+function normalizeEchoText(item: EchoItem): string {
+  return (item.ribbonText ?? item.originalText ?? item.content ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[：:，,。！？；、“”"'‘’（）()\[\]【】《》〈〉\-\s]/g, '')
+    .slice(0, 120)
+}
+
+function characterBigramSet(text: string): Set<string> {
+  if (text.length <= 1) return new Set(text ? [text] : [])
+  const grams = new Set<string>()
+  for (let index = 0; index < text.length - 1; index += 1) {
+    grams.add(text.slice(index, index + 2))
+  }
+  return grams
+}
+
+function isNearDuplicate(a: EchoItem, b: EchoItem): boolean {
+  const aModule = (a.moduleId ?? a.source ?? 'Echo').trim()
+  const bModule = (b.moduleId ?? b.source ?? 'Echo').trim()
+  if (aModule !== bModule) return false
+
+  const aText = normalizeEchoText(a)
+  const bText = normalizeEchoText(b)
+  if (!aText || !bText) return false
+  if (aText === bText) return true
+
+  const longer = Math.max(aText.length, bText.length)
+  const shorter = Math.min(aText.length, bText.length)
+  const similarLength = shorter / longer >= 0.82
+
+  if (similarLength && (aText.includes(bText) || bText.includes(aText))) return true
+  if (similarLength && aText.slice(0, 12) && aText.slice(0, 12) === bText.slice(0, 12)) return true
+
+  const aGrams = characterBigramSet(aText)
+  const bGrams = characterBigramSet(bText)
+  let overlap = 0
+  for (const gram of aGrams) {
+    if (bGrams.has(gram)) overlap += 1
+  }
+  const union = aGrams.size + bGrams.size - overlap
+  if (union <= 0) return false
+  return similarLength && overlap / union >= 0.9
+}
+
 function isLegacy(item: EchoItem): boolean {
   // 完全匹配
   if (LEGACY_CONTENT.has(item.content)) return true
@@ -101,8 +146,21 @@ export const flowHistory = {
   },
 
   append(documentId: string, newEchoes: EchoItem[], existing: EchoItem[]): EchoItem[] {
-    const merged = [...newEchoes, ...existing]
-    this.save(documentId, merged)
-    return merged
+    const seen = new Set<string>()
+    const merged = [...newEchoes, ...existing].filter((item) => {
+      const moduleKey = (item.moduleId ?? item.source ?? 'Echo').trim()
+      const textKey = (item.ribbonText ?? item.originalText ?? item.content ?? '').trim().toLowerCase().slice(0, 160)
+      const key = `${moduleKey}:${textKey}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    const deduped: EchoItem[] = []
+    for (const item of merged) {
+      if (deduped.some((existingItem) => isNearDuplicate(existingItem, item))) continue
+      deduped.push(item)
+    }
+    this.save(documentId, deduped)
+    return deduped
   },
 }

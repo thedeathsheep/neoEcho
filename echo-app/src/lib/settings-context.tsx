@@ -2,14 +2,14 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useState,
-  useCallback,
 } from 'react'
 
-import type { RibbonModuleConfig, RibbonSettings } from '@/types'
 import { customPromptService } from '@/services/custom-prompt.service'
+import type { RibbonModuleConfig, RibbonSettings } from '@/types'
 
 export interface Settings {
   apiKey: string
@@ -58,8 +58,39 @@ export const BUILTIN_RIBBON_MODULES: Omit<RibbonModuleConfig, 'enabled' | 'pinne
   { id: 'ai:polish', type: 'ai:polish', label: 'AI 润色' },
   { id: 'ai:narrative', type: 'ai:narrative', label: 'AI 叙事' },
   { id: 'ai:quote', type: 'ai:quote', label: 'AI 引用' },
-  { id: 'quick:helper', type: 'quick', label: '快速助手' },
 ]
+
+export const RECOMMENDED_ENABLED_AMBIENT_MODULES = 3
+export const MAX_ENABLED_AMBIENT_MODULES = 4
+
+export function getAmbientCustomPrompts() {
+  return customPromptService.getAll().filter((prompt) => (prompt.mode ?? 'ambient') === 'ambient')
+}
+
+export function sanitizeRibbonModules(modules: RibbonModuleConfig[]): RibbonModuleConfig[] {
+  const ambientCustomIds = new Set(getAmbientCustomPrompts().map((prompt) => prompt.id))
+  const filtered = modules.filter(
+    (module) => module.id !== 'quick:helper' && (module.type !== 'custom' || ambientCustomIds.has(module.id)),
+  )
+  const enabledAmbientModules = filtered
+    .map((module, index) => ({ module, index }))
+    .filter(({ module }) => module.type !== 'rag' && module.enabled)
+    .sort((left, right) => {
+      if (left.module.pinned !== right.module.pinned) return left.module.pinned ? -1 : 1
+      return left.index - right.index
+    })
+  const keepEnabledIds = new Set(
+    enabledAmbientModules.slice(0, MAX_ENABLED_AMBIENT_MODULES).map(({ module }) => module.id),
+  )
+
+  return filtered.map((module) => {
+    if (module.type === 'rag') return module
+    if (module.enabled && !keepEnabledIds.has(module.id)) {
+      return { ...module, enabled: false, pinned: false }
+    }
+    return module
+  })
+}
 
 function getDefaultRibbonSettings(): RibbonSettings {
   return {
@@ -137,14 +168,17 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
         if (!merged.ribbonSettings?.slotCount || !Array.isArray(merged.ribbonSettings?.modules)) {
           merged.ribbonSettings = getDefaultRibbonSettings()
         } else {
-          const saved = merged.ribbonSettings.modules as RibbonModuleConfig[]
+          const saved = (merged.ribbonSettings.modules as RibbonModuleConfig[]).filter(
+            (module) => module.id !== 'quick:helper',
+          )
           const byId = new Map(saved.map((m) => [m.id, m]))
           const builtinAiIds = BUILTIN_RIBBON_MODULES.filter((b) => (b.type || b.id || '').startsWith('ai:')).map((b) => b.id)
           const allAiDisabled = builtinAiIds.length > 0 && builtinAiIds.every((id) => byId.get(id)?.enabled === false)
-          const savedCustom = saved.filter((m) => m.type === 'custom')
+          const ambientCustomIds = new Set(getAmbientCustomPrompts().map((prompt) => prompt.id))
+          const savedCustom = saved.filter((m) => m.type === 'custom' && ambientCustomIds.has(m.id))
           const savedCustomIds = new Set(savedCustom.map((m) => m.id))
           // Merge custom prompts from customPromptService that are not yet in ribbon (e.g. 百科)
-          const customPrompts = customPromptService.getAll()
+          const customPrompts = getAmbientCustomPrompts()
           const newCustom = customPrompts
             .filter((p) => !savedCustomIds.has(p.id))
             .map((p) => ({
@@ -167,7 +201,7 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
           ]
           merged.ribbonSettings = {
             ...merged.ribbonSettings,
-            modules: normalized,
+            modules: sanitizeRibbonModules(normalized),
             allocationMode: merged.ribbonSettings.allocationMode ?? 'balanced',
           }
         }
@@ -190,10 +224,12 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     }
   }, [settings, loaded])
 
+  const theme = settings.theme
+  const fontSize = settings.fontSize
+
   // Apply theme and fontSize to DOM (after load so we don't overwrite inline script before hydrate)
   useEffect(() => {
     if (!loaded) return
-    const { theme, fontSize } = settings
     const resolvedTheme =
       theme === 'system'
         ? (typeof window !== 'undefined' &&
@@ -203,11 +239,11 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
         : theme
     document.documentElement.setAttribute('data-theme', resolvedTheme)
     document.documentElement.setAttribute('data-font-size', fontSize)
-  }, [loaded, settings.theme, settings.fontSize])
+  }, [fontSize, loaded, theme])
 
   // Subscribe to system preference when theme is 'system'
   useEffect(() => {
-    if (!loaded || settings.theme !== 'system') return
+    if (!loaded || theme !== 'system') return
     const mq = window.matchMedia?.('(prefers-color-scheme: dark)')
     if (!mq) return
     const handler = () => {
@@ -216,10 +252,21 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     }
     mq.addEventListener('change', handler)
     return () => mq.removeEventListener('change', handler)
-  }, [loaded, settings.theme])
+  }, [loaded, theme])
 
   const updateSettings = useCallback((updates: Partial<Settings>) => {
-    setSettings((prev) => ({ ...prev, ...updates }))
+    setSettings((prev) => {
+      const next = { ...prev, ...updates }
+      if (updates.ribbonSettings?.modules) {
+        next.ribbonSettings = {
+          ...prev.ribbonSettings,
+          ...updates.ribbonSettings,
+          modules: sanitizeRibbonModules(updates.ribbonSettings.modules),
+          allocationMode: updates.ribbonSettings.allocationMode ?? prev.ribbonSettings.allocationMode ?? 'balanced',
+        }
+      }
+      return next
+    })
   }, [])
 
   const resetSettings = useCallback(() => {

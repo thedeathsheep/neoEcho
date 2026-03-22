@@ -1,16 +1,17 @@
+import { devLog } from '@/lib/dev-log'
 import { createLogger } from '@/lib/logger'
-import type { EchoItem, EchoType, RagCandidate } from '@/types'
 import { generateId } from '@/lib/utils/crypto'
 import { now } from '@/lib/utils/time'
 import { searchVectors } from '@/lib/vector-store'
-import { devLog } from '@/lib/dev-log'
+import type { EchoItem, EchoType, RagCandidate } from '@/types'
+
+import { embed } from './embedding.service'
 import {
   getChunksByBase,
   getChunksByFiles,
   getMandatoryFilePaths,
   type KnowledgeChunk,
 } from './knowledge-base.service'
-import { embed } from './embedding.service'
 
 const logger = createLogger('rag.service')
 
@@ -23,8 +24,6 @@ const logger = createLogger('rag.service')
 const JITTER_FACTOR = 0.2
 const MAX_RESULTS = 5
 const VECTOR_WEIGHT = 0.7
-/** Per-view top-K for multi-view candidate merge; total candidates capped by CANDIDATES_MAX */
-const TOP_K_PER_VIEW = 5
 const CANDIDATES_MAX = 15
 const KEYWORD_WEIGHT = 0.3
 /** Minimum hybrid score to consider "strongly relevant"; reserve top-2 slots for these when possible. */
@@ -125,7 +124,7 @@ function takeTopWithReservedStrong(
 }
 
 function toEchoItem(scored: ScoredChunk, blockId?: string): EchoItem {
-  const full = scored.chunk.content
+  const full = extractReadableRagPassage(scored.chunk.content)
   return {
     id: generateId(),
     type: scored.type,
@@ -135,6 +134,45 @@ function toEchoItem(scored: ScoredChunk, blockId?: string): EchoItem {
     createdAt: now(),
     originalText: full,
   }
+}
+
+function extractReadableRagPassage(rawText: string): string {
+  const normalized = rawText
+    .replace(/\u3000/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[，。、；：！？"'“”‘’\]】）\s]+/u, '')
+    .replace(/^(的是|而是|或者|并且|而且|因此|所以|如果|因为|然后|于是)/u, '')
+    .trim()
+
+  if (!normalized) return ''
+
+  const sentenceLike = normalized.match(/[^。！？!?]+[。！？!?]?/gu) ?? [normalized]
+  const complete = sentenceLike
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 12 && /[。！？!?]$/u.test(part))
+
+  if (complete.length > 0) {
+    const preferred = complete.slice(0, 2).join('')
+    if (preferred.length <= 220) return preferred
+    const chunk = preferred.slice(0, 220)
+    const boundary = Math.max(chunk.lastIndexOf('。'), chunk.lastIndexOf('！'), chunk.lastIndexOf('？'))
+    if (boundary >= 24) return chunk.slice(0, boundary + 1).trim()
+    return `${chunk.trim()}…`
+  }
+
+  if (normalized.length <= 220) return normalized
+
+  const chunk = normalized.slice(0, 220)
+  const boundary = Math.max(
+    chunk.lastIndexOf('。'),
+    chunk.lastIndexOf('！'),
+    chunk.lastIndexOf('？'),
+    chunk.lastIndexOf('；'),
+    chunk.lastIndexOf('，'),
+  )
+  if (boundary >= 24) return chunk.slice(0, boundary + 1).trim()
+  return `${chunk.trim()}…`
 }
 
 /**
@@ -164,7 +202,7 @@ async function scoreChunks(
   hasEmbeddings: boolean,
 ): Promise<ScoredChunk[]> {
   // Vector search when embeddings available
-  let vectorScores = new Map<string, number>()
+  const vectorScores = new Map<string, number>()
 
   if (hasEmbeddings) {
     try {
@@ -421,7 +459,7 @@ export async function generateCandidatesByViews(
   const mandatoryMaxSlots = options.mandatoryMaxSlots ?? 1
 
   const merged = Array.from(byId.entries())
-    .map(([id, { chunk, score, type }]) => ({ chunk, score, type }))
+    .map(([_id, { chunk, score, type }]) => ({ chunk, score, type }))
     .sort((a, b) => b.score - a.score)
     .slice(0, CANDIDATES_MAX)
 
@@ -511,7 +549,7 @@ export const ragService = {
   /**
    * Get fallback echoes when knowledge base is empty
    */
-  getFallbackEchoes(blockId?: string): EchoItem[] {
+  getFallbackEchoes(_blockId?: string): EchoItem[] {
     return []
   },
 }

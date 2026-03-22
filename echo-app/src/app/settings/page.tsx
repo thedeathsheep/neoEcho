@@ -1,18 +1,25 @@
-'use client'
+﻿'use client'
 
-import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
+import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
-import { useSettings, BUILTIN_RIBBON_MODULES } from '@/lib/settings-context'
-import { validateApiKey, getDefaultPromptForModule, generatePromptFromDescription, DEFAULT_SYSTEM_PROMPTS } from '@/services/client-ai.service'
-import { validateEmbeddingApi } from '@/services/embedding.service'
-import { KnowledgeBaseManager } from '@/components/ui/knowledge-base-manager'
-import { CustomPromptManager } from '@/components/ui/custom-prompt-manager'
 import { AboutModal } from '@/components/help/about-modal'
-import { knowledgeBaseService } from '@/services/knowledge-base.service'
+import { CustomPromptManager } from '@/components/ui/custom-prompt-manager'
+import { KnowledgeBaseManager } from '@/components/ui/knowledge-base-manager'
+import {
+  BUILTIN_RIBBON_MODULES,
+  getAmbientCustomPrompts,
+  MAX_ENABLED_AMBIENT_MODULES,
+  RECOMMENDED_ENABLED_AMBIENT_MODULES,
+  sanitizeRibbonModules,
+  useSettings,
+} from '@/lib/settings-context'
+import { generatePromptFromDescription,getDefaultPromptForModule, validateApiKey } from '@/services/client-ai.service'
 import { customPromptService } from '@/services/custom-prompt.service'
-import type { RibbonModuleConfig, RibbonSlotCount, RibbonModuleType, AllocationMode } from '@/types'
+import { validateEmbeddingApi } from '@/services/embedding.service'
+import { knowledgeBaseService } from '@/services/knowledge-base.service'
+import type { AllocationMode,RibbonModuleConfig, RibbonModuleType, RibbonSlotCount } from '@/types'
 
 const PRESETS = [
   { label: 'DeepSeek', url: 'https://api.deepseek.com', model: 'deepseek-chat' },
@@ -33,33 +40,76 @@ type ValidationStatus = 'idle' | 'loading' | 'success' | 'error'
 const MAX_PINNED = 5
 const RAG_PINNED_MAX = 3
 
+function countEnabledAmbientModules(modules: RibbonModuleConfig[]): number {
+  return modules.filter((module) => module.type !== 'rag' && module.enabled).length
+}
+
+function buildRibbonModulesForSettings(modules: RibbonModuleConfig[]): RibbonModuleConfig[] {
+  const byId = new Map(modules.map((module) => [module.id, module]))
+  const builtin = BUILTIN_RIBBON_MODULES.filter((module) => module.type !== 'quick').map((module) => {
+    const saved = byId.get(module.id)
+    return {
+      ...module,
+      label: saved?.label ?? module.label,
+      enabled: saved?.enabled ?? (module.id === 'rag' || module.id === 'ai:imagery'),
+      pinned: saved?.pinned ?? false,
+      prompt: saved?.prompt,
+      model: saved?.model,
+    }
+  })
+  const custom = getAmbientCustomPrompts().map((prompt) => {
+    const saved = byId.get(prompt.id)
+    return {
+      id: prompt.id,
+      type: 'custom' as const,
+      label: saved?.label ?? prompt.name,
+      enabled: saved?.enabled ?? false,
+      pinned: saved?.pinned ?? false,
+      prompt: saved?.prompt,
+      model: saved?.model,
+    }
+  })
+  return sanitizeRibbonModules([...builtin, ...custom])
+}
+
+function isSameRibbonModuleState(left: RibbonModuleConfig[], right: RibbonModuleConfig[]) {
+  if (left.length !== right.length) return false
+  return left.every((module, index) => {
+    const peer = right[index]
+    return (
+      module.id === peer.id &&
+      module.type === peer.type &&
+      module.label === peer.label &&
+      module.enabled === peer.enabled &&
+      module.pinned === peer.pinned &&
+      module.prompt === peer.prompt &&
+      module.model === peer.model
+    )
+  })
+}
+
 function RibbonModulesEditor({
   ribbonModules,
   setRibbonModules,
-  onAddCustomPrompt,
   onManageCustomPrompts,
   onEditModulePrompt,
 }: {
   ribbonModules: RibbonModuleConfig[]
   setRibbonModules: React.Dispatch<React.SetStateAction<RibbonModuleConfig[]>>
-  onAddCustomPrompt: () => void
   onManageCustomPrompts: () => void
   onEditModulePrompt: (moduleId: string, moduleType: RibbonModuleType, currentPrompt?: string, currentModel?: string, currentLabel?: string) => void
 }) {
-  const [ragFixedCount, setRagFixedCount] = useState(0)
-  const [customPrompts, setCustomPrompts] = useState<{ id: string; name: string }[]>([])
+  const activeBase = knowledgeBaseService.getActive()
+  const ragFixedCount = Math.min(RAG_PINNED_MAX, activeBase?.mandatoryBooks?.length ?? 0)
+  const customPrompts = getAmbientCustomPrompts()
+  const isPinEligible = (mod: RibbonModuleConfig) => {
+    if (mod.type === 'rag') return false
+    return mod.id !== 'quick:helper'
+  }
 
-  // Load client-side data after hydration; refresh custom list when module count changes (e.g. after adding custom)
-  const moduleCount = ribbonModules.length
-  useEffect(() => {
-    const activeBase = knowledgeBaseService.getActive()
-    setRagFixedCount(Math.min(RAG_PINNED_MAX, activeBase?.mandatoryBooks?.length ?? 0))
-    setCustomPrompts(customPromptService.getAll())
-  }, [moduleCount])
+  const byId = new Map(sanitizeRibbonModules(ribbonModules).map((m) => [m.id, m]))
 
-  const byId = new Map(ribbonModules.map((m) => [m.id, m]))
-
-  const builtin = BUILTIN_RIBBON_MODULES.map((b) => ({
+  const builtin = BUILTIN_RIBBON_MODULES.filter((b) => b.id !== 'quick:helper').map((b) => ({
     ...b,
     enabled: byId.get(b.id)?.enabled ?? (b.id === 'rag' || b.id === 'ai:imagery'),
     pinned: byId.get(b.id)?.pinned ?? false,
@@ -75,6 +125,9 @@ function RibbonModulesEditor({
   const otherPinnedCount = displayModules.filter((m) => m.type !== 'rag' && m.pinned).length
   const totalPinned = ragFixedCount + otherPinnedCount
   const canPinMore = totalPinned < MAX_PINNED
+  const enabledAmbientCount = countEnabledAmbientModules(displayModules)
+  const isOverRecommended = enabledAmbientCount > RECOMMENDED_ENABLED_AMBIENT_MODULES
+  const canEnableMore = enabledAmbientCount < MAX_ENABLED_AMBIENT_MODULES
 
   const updateModule = (id: string, patch: Partial<Pick<RibbonModuleConfig, 'enabled' | 'pinned'>>) => {
     setRibbonModules((prev) => {
@@ -94,6 +147,18 @@ function RibbonModulesEditor({
     return mod.label
   }
 
+  const setEnabled = (mod: RibbonModuleConfig, enabled: boolean) => {
+    if (!enabled) {
+      updateModule(mod.id, { enabled: false, pinned: false })
+      return
+    }
+    if (mod.type !== 'rag' && !mod.enabled && !canEnableMore) {
+      toast.error(`织带生成模块最多同时启用 ${MAX_ENABLED_AMBIENT_MODULES} 个；再多会明显拖慢刷新并放大超时。`)
+      return
+    }
+    updateModule(mod.id, { enabled: true })
+  }
+
   const setPinned = (mod: RibbonModuleConfig, pinned: boolean) => {
     if (mod.type === 'rag') return
     if (pinned && !canPinMore) {
@@ -104,41 +169,56 @@ function RibbonModulesEditor({
   }
 
   return (
-    <div className="space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-      <div className="flex items-center justify-between">
-        <p className="text-xs text-[var(--color-ink-faint)]">
-          固定 {totalPinned}/{MAX_PINNED}（共鸣库强制检索在「共鸣库管理」中设置，最多 {RAG_PINNED_MAX} 本）
-        </p>
-        <div className="flex items-center gap-2">
+    <div className="space-y-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="space-y-1">
+          <p className="text-xs text-[var(--color-ink-faint)]">
+            每启用 1 个非共鸣库模块，就会新增 1 个后台生成请求。建议保持在 {RECOMMENDED_ENABLED_AMBIENT_MODULES} 个以内，硬上限 {MAX_ENABLED_AMBIENT_MODULES} 个。
+          </p>
+          <p className="text-xs text-[var(--color-ink-faint)]">
+            固定 {totalPinned}/{MAX_PINNED}，表示该模块有候选时优先显示；详情型自定义模块不会出现在织带里。
+          </p>
+        </div>
+        <div className="flex items-center gap-2 text-xs">
           <button
             onClick={onManageCustomPrompts}
-            className="text-xs px-2 py-1 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5 transition-colors"
+            className="px-2 py-1 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5 transition-colors"
           >
-            管理自定义
-          </button>
-          <button
-            onClick={onAddCustomPrompt}
-            className="text-xs px-2 py-1 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5 transition-colors flex items-center gap-1"
-          >
-            <span>+</span>
-            <span>添加自定义</span>
+            自定义模块
           </button>
         </div>
       </div>
-      {displayModules.map((mod) => (
-        <div key={mod.id} className="flex items-center gap-3 py-1.5 group">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className={`rounded-full px-2 py-1 ${isOverRecommended ? 'bg-amber-500/10 text-amber-600' : 'bg-[var(--color-paper)] text-[var(--color-ink-faint)]'}`}>
+          已启用生成模块 {enabledAmbientCount}/{MAX_ENABLED_AMBIENT_MODULES}
+        </span>
+        <span className="rounded-full bg-[var(--color-paper)] px-2 py-1 text-[var(--color-ink-faint)]">
+          推荐不超过 {RECOMMENDED_ENABLED_AMBIENT_MODULES}
+        </span>
+        <span className="rounded-full bg-[var(--color-paper)] px-2 py-1 text-[var(--color-ink-faint)]">
+          ambient 自定义 {customPrompts.length}
+        </span>
+      </div>
+      {isOverRecommended && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700">
+          当前勾选已经进入高负载区。刷新会变慢，超时和织带抖动都会明显增加；如果只是日常写作，先保留 2-3 个最常用模块更稳。
+        </div>
+      )}
+      <div className="divide-y divide-[var(--color-border)]/60">
+        {displayModules.map((mod) => (
+          <div key={mod.id} className="flex items-center gap-3 py-2 group">
           <input
             type="checkbox"
             id={`ribbon-enable-${mod.id}`}
             checked={mod.enabled}
-            onChange={(e) => updateModule(mod.id, { enabled: e.target.checked })}
+            onChange={(e) => setEnabled(mod, e.target.checked)}
             className="rounded border-[var(--color-border)]"
           />
           <label htmlFor={`ribbon-enable-${mod.id}`} className="flex-1 text-sm text-[var(--color-ink)] min-w-0 truncate">
             {getModuleLabel(mod)}
           </label>
           {/* Edit button for AI modules (built-in, custom, and quick) */}
-          {mod.type !== 'rag' && (
+          {isPinEligible(mod) && (
             <button
               onClick={() => {
                 const currentPrompt = mod.type === 'custom' ? (customPromptService.get(mod.id)?.content ?? '') : mod.prompt
@@ -152,7 +232,7 @@ function RibbonModulesEditor({
           )}
           {mod.type === 'rag' ? (
             <span className="text-xs text-[var(--color-ink-faint)]">
-              强制 {ragFixedCount} 本
+              强制检索 {ragFixedCount} 本
             </span>
           ) : (
             <input
@@ -164,13 +244,14 @@ function RibbonModulesEditor({
               className="rounded border-[var(--color-border)]"
             />
           )}
-          {mod.type !== 'rag' && (
+          {isPinEligible(mod) && (
             <label htmlFor={`ribbon-pin-${mod.id}`} className="text-xs text-[var(--color-ink-faint)]">
               固定
             </label>
           )}
-        </div>
-      ))}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -178,36 +259,44 @@ function RibbonModulesEditor({
 export default function SettingsPage() {
   const router = useRouter()
   const { settings, updateSettings } = useSettings()
+  const initialRibbonRunProfile =
+    settings.ribbonRunProfile ??
+    (settings.reliableRibbonMode ? 'reliable' : settings.lowLatencyMode ? 'fast' : 'balanced')
+  const initialRibbonSettings = settings.ribbonSettings
+  const initialRibbonModules = buildRibbonModulesForSettings(
+    initialRibbonSettings?.modules?.length
+      ? initialRibbonSettings.modules
+      : BUILTIN_RIBBON_MODULES.filter((m) => m.type !== 'quick').map((m) => ({
+          ...m,
+          enabled: m.id === 'rag' || m.id === 'ai:imagery',
+          pinned: false,
+        })),
+  )
 
   const [apiKey, setApiKey] = useState(settings.apiKey)
   const [model, setModel] = useState(settings.model)
   const [baseUrl, setBaseUrl] = useState(settings.baseUrl)
   const [ribbonRunProfile, setRibbonRunProfile] = useState<'balanced' | 'fast' | 'reliable'>(
-    settings.ribbonRunProfile ??
-      (settings.reliableRibbonMode ? 'reliable' : settings.lowLatencyMode ? 'fast' : 'balanced')
+    initialRibbonRunProfile
   )
-  const [semanticExpansion, setSemanticExpansion] = useState(settings.semanticExpansion ?? false)
+  const [semanticExpansion, setSemanticExpansion] = useState(
+    initialRibbonRunProfile === 'fast' ? false : (settings.semanticExpansion ?? false),
+  )
   const [ribbonAiFilter, setRibbonAiFilter] = useState(settings.ribbonAiFilter ?? false)
-  const [ragRerankEnabled, setRagRerankEnabled] = useState(settings.ragRerankEnabled ?? false)
+  const [ragRerankEnabled, setRagRerankEnabled] = useState(
+    initialRibbonRunProfile === 'fast' ? false : (settings.ragRerankEnabled ?? false),
+  )
   const [sensoryZoomEnabled, setSensoryZoomEnabled] = useState(settings.sensoryZoomEnabled ?? true)
   const [clicheDetectionEnabled, setClicheDetectionEnabled] = useState(settings.clicheDetectionEnabled ?? false)
   const [ribbonFilterModel, setRibbonFilterModel] = useState(settings.ribbonFilterModel ?? '')
   const [ribbonPauseSeconds, setRibbonPauseSeconds] = useState(settings.ribbonPauseSeconds ?? 2)
   const [ribbonSlotCount, setRibbonSlotCount] = useState<RibbonSlotCount>(
-    (settings.ribbonSettings?.slotCount ?? 5) as RibbonSlotCount
+    (initialRibbonSettings?.slotCount ?? 5) as RibbonSlotCount
   )
   const [allocationMode, setAllocationMode] = useState<AllocationMode>(
-    (settings.ribbonSettings?.allocationMode ?? 'balanced') as AllocationMode
+    (initialRibbonSettings?.allocationMode ?? 'balanced') as AllocationMode
   )
-  const [ribbonModules, setRibbonModules] = useState<RibbonModuleConfig[]>(() => {
-    const mods = settings.ribbonSettings?.modules
-    if (mods?.length) return mods
-    return BUILTIN_RIBBON_MODULES.map((m) => ({
-      ...m,
-      enabled: m.id === 'rag' || m.id === 'ai:imagery',
-      pinned: false,
-    }))
-  })
+  const [ribbonModules, setRibbonModules] = useState<RibbonModuleConfig[]>(initialRibbonModules)
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>(settings.theme ?? 'light')
   const [fontSize, setFontSize] = useState<'small' | 'medium' | 'large'>(settings.fontSize ?? 'medium')
   const [useEmbeddingApi, setUseEmbeddingApi] = useState(settings.useEmbeddingApi ?? false)
@@ -221,58 +310,6 @@ export default function SettingsPage() {
   const [filterValidationMsg, setFilterValidationMsg] = useState('')
 
   const isFastProfile = ribbonRunProfile === 'fast'
-  const isReliableProfile = ribbonRunProfile === 'reliable'
-
-  useEffect(() => {
-    setRibbonRunProfile(
-      settings.ribbonRunProfile ??
-        (settings.reliableRibbonMode ? 'reliable' : settings.lowLatencyMode ? 'fast' : 'balanced')
-    )
-  }, [settings.ribbonRunProfile, settings.reliableRibbonMode, settings.lowLatencyMode])
-  useEffect(() => {
-    setSemanticExpansion(settings.semanticExpansion ?? false)
-  }, [settings.semanticExpansion])
-  useEffect(() => {
-    setRibbonAiFilter(settings.ribbonAiFilter ?? false)
-  }, [settings.ribbonAiFilter])
-  useEffect(() => {
-    setRagRerankEnabled(settings.ragRerankEnabled ?? false)
-  }, [settings.ragRerankEnabled])
-  useEffect(() => {
-    setSensoryZoomEnabled(settings.sensoryZoomEnabled ?? true)
-  }, [settings.sensoryZoomEnabled])
-  useEffect(() => {
-    setClicheDetectionEnabled(settings.clicheDetectionEnabled ?? false)
-  }, [settings.clicheDetectionEnabled])
-  useEffect(() => {
-    if (!isFastProfile) return
-    setSemanticExpansion(false)
-    setRagRerankEnabled(false)
-  }, [isFastProfile])
-  useEffect(() => {
-    setRibbonFilterModel(settings.ribbonFilterModel ?? '')
-  }, [settings.ribbonFilterModel])
-  useEffect(() => {
-    setRibbonPauseSeconds(Math.min(10, Math.max(1, settings.ribbonPauseSeconds ?? 2)))
-  }, [settings.ribbonPauseSeconds])
-  useEffect(() => {
-    const rs = settings.ribbonSettings
-    if (rs?.slotCount) setRibbonSlotCount(Math.min(8, Math.max(5, rs.slotCount)) as RibbonSlotCount)
-    if (rs?.allocationMode) setAllocationMode(rs.allocationMode as AllocationMode)
-    if (rs?.modules?.length) setRibbonModules(rs.modules)
-  }, [settings.ribbonSettings])
-  useEffect(() => {
-    setTheme(settings.theme ?? 'light')
-  }, [settings.theme])
-  useEffect(() => {
-    setFontSize(settings.fontSize ?? 'medium')
-  }, [settings.fontSize])
-  useEffect(() => {
-    setUseEmbeddingApi(settings.useEmbeddingApi ?? false)
-    setEmbeddingBaseUrl(settings.embeddingBaseUrl ?? '')
-    setEmbeddingApiKey(settings.embeddingApiKey ?? '')
-    setEmbeddingModel(settings.embeddingModel ?? 'BAAI/bge-m3')
-  }, [settings.useEmbeddingApi, settings.embeddingBaseUrl, settings.embeddingApiKey, settings.embeddingModel])
 
   const [validationStatus, setValidationStatus] = useState<ValidationStatus>('idle')
   const [validationMsg, setValidationMsg] = useState('')
@@ -280,9 +317,7 @@ export default function SettingsPage() {
   const [showPresets, setShowPresets] = useState(false)
   const [showKbManager, setShowKbManager] = useState(false)
   const [showPromptManager, setShowPromptManager] = useState(false)
-  const [showAddModule, setShowAddModule] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
-  const [kbStats, setKbStats] = useState({ baseCount: 0, totalFiles: 0 })
 
   // Module prompt editing
   const [editingModuleId, setEditingModuleId] = useState<string | null>(null)
@@ -290,6 +325,29 @@ export default function SettingsPage() {
   const [editingModulePrompt, setEditingModulePrompt] = useState('')
   const [editingModuleModel, setEditingModuleModel] = useState<string | undefined>(undefined)
   const [editingModuleLabel, setEditingModuleLabel] = useState<string | undefined>(undefined)
+
+  const applyRibbonRunProfile = (profile: 'balanced' | 'fast' | 'reliable') => {
+    setRibbonRunProfile(profile)
+    if (profile === 'fast') {
+      setSemanticExpansion(false)
+      setRagRerankEnabled(false)
+    }
+  }
+
+  const syncRibbonModulesFromCustomPrompts = useCallback(() => {
+    setRibbonModules((prev) => {
+      const next = buildRibbonModulesForSettings(prev)
+      return isSameRibbonModuleState(prev, next) ? prev : next
+    })
+  }, [])
+
+  useEffect(() => {
+    const handlePromptsUpdated = () => {
+      syncRibbonModulesFromCustomPrompts()
+    }
+    window.addEventListener('custom-prompts-updated', handlePromptsUpdated)
+    return () => window.removeEventListener('custom-prompts-updated', handlePromptsUpdated)
+  }, [syncRibbonModulesFromCustomPrompts])
 
   const handlePreset = (preset: (typeof PRESETS)[number]) => {
     setBaseUrl(preset.url)
@@ -315,25 +373,6 @@ export default function SettingsPage() {
     }
   }
 
-  // Load knowledge base stats
-  const refreshKbStats = useCallback(async () => {
-    const stats = await knowledgeBaseService.getGlobalStats()
-    setKbStats({
-      baseCount: stats.baseCount,
-      totalFiles: stats.totalFiles,
-    })
-  }, [])
-
-  useEffect(() => {
-    refreshKbStats()
-    // Listen for knowledge base updates
-    const handleUpdate = () => refreshKbStats()
-    window.addEventListener('knowledge-base-updated', handleUpdate)
-    return () => {
-      window.removeEventListener('knowledge-base-updated', handleUpdate)
-    }
-  }, [refreshKbStats])
-
   // Custom module management is now handled directly in the module editor
 
   const handleSave = () => {
@@ -341,6 +380,12 @@ export default function SettingsPage() {
     const effectiveRagRerank = isFastProfile ? false : ragRerankEnabled
     const effectiveLowLatencyMode = ribbonRunProfile === 'fast'
     const effectiveReliableRibbonMode = ribbonRunProfile === 'reliable'
+    const sanitizedRibbonModules = sanitizeRibbonModules(ribbonModules)
+    const enabledAmbientBeforeSave = countEnabledAmbientModules(ribbonModules)
+    const enabledAmbientAfterSave = countEnabledAmbientModules(sanitizedRibbonModules)
+    if (enabledAmbientAfterSave !== enabledAmbientBeforeSave) {
+      setRibbonModules(sanitizedRibbonModules)
+    }
     updateSettings({
       apiKey,
       model,
@@ -359,15 +404,15 @@ export default function SettingsPage() {
         slotCount: ribbonSlotCount,
         allocationMode,
         modules: [
-          ...BUILTIN_RIBBON_MODULES.map((b) => {
-            const saved = ribbonModules.find((m) => m.id === b.id)
+          ...BUILTIN_RIBBON_MODULES.filter((b) => b.type !== 'quick').map((b) => {
+            const saved = sanitizedRibbonModules.find((m) => m.id === b.id)
             return {
               ...b,
               enabled: saved?.enabled ?? (b.id === 'rag' || b.id === 'ai:imagery'),
               pinned: saved?.pinned ?? false,
             }
           }),
-          ...ribbonModules.filter((m) => m.type === 'custom'),
+          ...sanitizedRibbonModules.filter((m) => m.type === 'custom'),
         ],
       },
       theme,
@@ -377,7 +422,11 @@ export default function SettingsPage() {
       embeddingApiKey,
       embeddingModel,
     })
-    toast.success('设置已保存')
+    toast.success(
+      enabledAmbientAfterSave !== enabledAmbientBeforeSave
+        ? `设置已保存；织带模块已自动收敛到最多 ${MAX_ENABLED_AMBIENT_MODULES} 个生成来源`
+        : '设置已保存',
+    )
   }
 
   const handleEmbeddingPreset = (preset: (typeof EMBEDDING_PRESETS)[number]) => {
@@ -421,45 +470,90 @@ export default function SettingsPage() {
     }
   }
 
-  const handleAddCustomModule = (name: string, prompt: string) => {
-    const created = customPromptService.create(name, prompt)
-    const newModule: RibbonModuleConfig = {
-      id: created.id,
-      type: 'custom',
-      label: created.name,
-      enabled: true,
-      pinned: false,
-    }
-    setRibbonModules(prev => [...prev, newModule])
-    setShowAddModule(false)
-    toast.success(`已添加自定义模块「${created.name}」`)
+  const validationTone: Record<ValidationStatus, string> = {
+    idle: 'text-[var(--color-ink-faint)]',
+    loading: 'text-yellow-600',
+    success: 'text-green-600',
+    error: 'text-red-500',
   }
 
-  const statusColor: Record<ValidationStatus, string> = {
-    idle: 'border-[var(--color-border)]',
-    loading: 'border-yellow-400',
-    success: 'border-green-400',
-    error: 'border-red-400',
+  const validationCopy: Record<ValidationStatus, string> = {
+    idle: '尚未验证',
+    loading: '正在验证连接',
+    success: '连接成功',
+    error: validationMsg || '连接失败',
   }
+  const hasApiKey = apiKey.trim().length > 0
+  const enabledAmbientModuleCount = countEnabledAmbientModules(ribbonModules)
+  const ambientPromptCount = getAmbientCustomPrompts().length
+  const ribbonLoadLabel =
+    enabledAmbientModuleCount > RECOMMENDED_ENABLED_AMBIENT_MODULES
+      ? '高负载'
+      : enabledAmbientModuleCount === 0
+        ? '未启用'
+        : '正常'
 
   return (
-    <div className="min-h-screen bg-[var(--color-paper)] flex flex-col items-center pt-20 pb-20">
-      <div className="w-full max-w-2xl px-8">
-        <div className="flex items-center justify-between mb-12">
-          <h1 className="text-3xl font-serif text-[var(--color-ink)]">设置</h1>
-          <button
-            onClick={() => router.back()}
-            className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] transition-colors"
-          >
-            返回
-          </button>
+    <div className="min-h-screen bg-[var(--color-paper)] pb-24">
+      <div className="sticky top-0 z-20 border-b border-[var(--color-border)]/70 bg-[var(--color-paper)]/92 backdrop-blur">
+        <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-4 px-6 py-4">
+          <div>
+            <h1 className="text-3xl font-serif text-[var(--color-ink)]">设置</h1>
+            <p className="mt-1 text-sm text-[var(--color-ink-faint)]">
+              把连接、织带和界面控制在一页里，少跳转，少猜测。
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowAbout(true)}
+              className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm text-[var(--color-ink-light)] hover:text-[var(--color-ink)] hover:bg-[var(--color-ink)]/5 transition-colors"
+            >
+              关于 / 帮助
+            </button>
+            <button
+              onClick={handleSave}
+              className="px-5 py-2 bg-[var(--color-btn-primary-bg)] text-[var(--color-btn-primary-text)] rounded-lg hover:opacity-90 transition-opacity"
+            >
+              保存设置
+            </button>
+            <button
+              onClick={() => router.back()}
+              className="px-4 py-2 text-sm text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] transition-colors"
+            >
+              返回
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="mx-auto w-full max-w-4xl px-6 pt-8">
+        <div className="mb-8 grid gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper-warm)] p-4 sm:grid-cols-3">
+          <div className="rounded-xl bg-[var(--color-surface)] px-4 py-3">
+            <div className="text-xs text-[var(--color-ink-faint)]">主模型</div>
+            <div className="mt-1 text-sm font-medium text-[var(--color-ink)]">
+              {validationStatus === 'success' ? '已连接' : hasApiKey ? '待验证' : '未配置'}
+            </div>
+            <div className="mt-1 text-xs text-[var(--color-ink-faint)]">{model || '未填写模型名'}</div>
+          </div>
+          <div className="rounded-xl bg-[var(--color-surface)] px-4 py-3">
+            <div className="text-xs text-[var(--color-ink-faint)]">织带负载</div>
+            <div className="mt-1 text-sm font-medium text-[var(--color-ink)]">{ribbonLoadLabel}</div>
+            <div className="mt-1 text-xs text-[var(--color-ink-faint)]">
+              已启用 {enabledAmbientModuleCount} 个生成模块，运行档为 {ribbonRunProfile}
+            </div>
+          </div>
+          <div className="rounded-xl bg-[var(--color-surface)] px-4 py-3">
+            <div className="text-xs text-[var(--color-ink-faint)]">自定义模块</div>
+            <div className="mt-1 text-sm font-medium text-[var(--color-ink)]">{ambientPromptCount} 个 ambient 模块</div>
+            <div className="mt-1 text-xs text-[var(--color-ink-faint)]">
+              detail 模块只在详情解释中使用，不会进入织带
+            </div>
+          </div>
         </div>
 
-        <div className="space-y-8">
-          <section
-            className={`bg-[var(--color-paper-warm)] backdrop-blur rounded-xl border-2 p-6 transition-colors ${statusColor[validationStatus]}`}
-          >
-            <div className="flex items-center justify-between mb-4">
+        <div className="space-y-6">
+          <section className="bg-[var(--color-paper-warm)] backdrop-blur rounded-xl border border-[var(--color-border)] p-6">
+            <div className="flex items-start justify-between gap-4 mb-4">
               <div>
                 <h2 className="text-lg font-medium text-[var(--color-ink)]">
                   主模型配置
@@ -468,12 +562,25 @@ export default function SettingsPage() {
                   用于织带AI模块生成内容（意象/润色/叙事/引用等）
                 </p>
               </div>
-              {validationStatus === 'success' && (
-                <span className="flex items-center gap-1.5 text-xs text-green-600 font-medium">
-                  <span className="w-2 h-2 rounded-full bg-green-500" />
-                  已连接
+              <div className="flex items-center gap-2 shrink-0">
+                <span className={`text-xs font-medium ${validationTone[validationStatus]}`}>
+                  {validationCopy[validationStatus]}
                 </span>
-              )}
+                <button
+                  onClick={handleValidate}
+                  disabled={!apiKey || !baseUrl || validationStatus === 'loading'}
+                  className="px-3 py-1.5 text-xs border border-[var(--color-border)] rounded-lg hover:bg-[var(--color-ink)]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                >
+                  {validationStatus === 'loading' ? (
+                    <span className="flex items-center gap-2">
+                      <span className="w-3 h-3 border-2 border-[var(--color-ink-faint)] border-t-transparent rounded-full animate-spin" />
+                      验证中...
+                    </span>
+                  ) : (
+                    '验证连接'
+                  )}
+                </button>
+              </div>
             </div>
 
             <div className="space-y-5">
@@ -568,35 +675,21 @@ export default function SettingsPage() {
                 )}
               </div>
 
-              {/* Validate Button */}
-              <div>
-                <button
-                  onClick={handleValidate}
-                  disabled={!apiKey || !baseUrl || validationStatus === 'loading'}
-                  className="px-4 py-2 text-sm border border-[var(--color-border)] rounded-lg hover:bg-[var(--color-ink)]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                >
-                  {validationStatus === 'loading' ? (
-                    <span className="flex items-center gap-2">
-                      <span className="w-3 h-3 border-2 border-[var(--color-ink-faint)] border-t-transparent rounded-full animate-spin" />
-                      验证中...
-                    </span>
-                  ) : (
-                    '验证连接'
+              {(validationMsg || availableModels.length > 0 || validationStatus !== 'idle') && (
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)] px-3 py-2 text-xs">
+                  <span className={validationTone[validationStatus]}>
+                    {validationStatus === 'success' ? '✓' : validationStatus === 'error' ? '✗' : '•'} {validationCopy[validationStatus]}
+                  </span>
+                  {validationMsg && validationStatus !== 'success' && (
+                    <span className="text-[var(--color-ink-faint)]">{validationMsg}</span>
                   )}
-                </button>
-
-                {validationMsg && (
-                  <p
-                    className={`mt-2 text-sm ${
-                      validationStatus === 'success'
-                        ? 'text-green-600'
-                        : 'text-red-500'
-                    }`}
-                  >
-                    {validationStatus === 'success' ? '✓' : '✗'} {validationMsg}
-                  </p>
-                )}
-              </div>
+                  {availableModels.length > 0 && (
+                    <span className="text-[var(--color-ink-faint)]">
+                      已发现 {availableModels.length} 个可用模型
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
 
             <p className="text-xs text-[var(--color-ink-faint)] mt-4 leading-relaxed">
@@ -859,12 +952,11 @@ export default function SettingsPage() {
               {/* Ribbon content modules */}
               <div>
                 <label className="block text-sm text-[var(--color-ink-light)] mb-2">
-                  内容模块（启用多个同时生效，固定来源最多 5 个）
+                  内容模块（启用多个同时生效，固定表示有候选时优先显示）
                 </label>
                 <RibbonModulesEditor
                   ribbonModules={ribbonModules}
                   setRibbonModules={setRibbonModules}
-                  onAddCustomPrompt={() => setShowAddModule(true)}
                   onManageCustomPrompts={() => setShowPromptManager(true)}
                   onEditModulePrompt={(moduleId, moduleType, currentPrompt, currentModel, currentLabel) => {
                     setEditingModuleId(moduleId)
@@ -874,9 +966,16 @@ export default function SettingsPage() {
                     setEditingModuleLabel(currentLabel)
                   }}
                 />
-                <p className="text-xs text-[var(--color-ink-faint)] mt-2">
-                  勾选的模块会同时生效，风格由各模块决定（意象 / 润色 / 叙事 / 引用等）。点击「+ 添加自定义」可创建新的提示词模块。
-                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-[var(--color-ink-faint)]">
+                  <span>每多勾选 1 个非共鸣库模块，就会多出 1 个后台生成请求；详情型自定义模块不会进入这里。</span>
+                  <span>固定只影响展示优先级，不会让该模块跳过生成或超时；新建和编辑自定义模块都统一放在「自定义模块」里。</span>
+                  <button
+                    onClick={() => setShowKbManager(true)}
+                    className="hover:text-[var(--color-ink)] underline underline-offset-2 transition-colors"
+                  >
+                    管理共鸣库
+                  </button>
+                </div>
               </div>
 
               {/* Ribbon run profile */}
@@ -898,7 +997,7 @@ export default function SettingsPage() {
                     <button
                       key={opt.value}
                       type="button"
-                      onClick={() => setRibbonRunProfile(opt.value)}
+                      onClick={() => applyRibbonRunProfile(opt.value)}
                       className={`text-left px-3 py-2 border rounded-lg transition-colors ${
                         ribbonRunProfile === opt.value
                           ? 'border-[var(--color-ink)] bg-[var(--color-ink)]/10 text-[var(--color-ink)]'
@@ -1039,26 +1138,6 @@ export default function SettingsPage() {
                 </label>
               </div>
 
-              {/* Knowledge Base Management Link */}
-              <div className="pt-4 border-t border-[var(--color-border)]">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <label className="block text-sm text-[var(--color-ink-light)] mb-1">
-                      共鸣库管理
-                    </label>
-                    <p className="text-xs text-[var(--color-ink-faint)]">
-                      已创建 {kbStats.baseCount} 个库，共 {kbStats.totalFiles} 本书籍
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setShowKbManager(true)}
-                    className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5 transition-colors"
-                  >
-                    管理共鸣库
-                  </button>
-                </div>
-              </div>
-
               {/* Echo Gallery (curator report) */}
               <div className="pt-4 border-t border-[var(--color-border)]">
                 <div className="flex items-center justify-between">
@@ -1143,30 +1222,13 @@ export default function SettingsPage() {
             </div>
           </section>
 
-          <div className="flex justify-between items-center pt-4">
-            <button
-              onClick={() => setShowAbout(true)}
-              className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm text-[var(--color-ink-light)] hover:text-[var(--color-ink)] hover:bg-[var(--color-ink)]/5 transition-colors"
-            >
-              关于 / 帮助
-            </button>
-            <button
-              onClick={handleSave}
-              className="px-6 py-2 bg-[var(--color-btn-primary-bg)] text-[var(--color-btn-primary-text)] rounded-lg hover:opacity-90 transition-opacity"
-            >
-              保存设置
-            </button>
-          </div>
         </div>
       </div>
 
       {/* Knowledge Base Manager Modal */}
       <KnowledgeBaseManager
         isOpen={showKbManager}
-        onClose={() => {
-          setShowKbManager(false)
-          refreshKbStats()
-        }}
+        onClose={() => setShowKbManager(false)}
       />
 
       {/* Custom Prompt Manager Modal */}
@@ -1175,18 +1237,10 @@ export default function SettingsPage() {
         onClose={() => setShowPromptManager(false)}
       />
 
-      {/* Add Custom Module Modal */}
-      {showAddModule && (
-        <AddCustomModuleModal
-          isOpen={showAddModule}
-          onClose={() => setShowAddModule(false)}
-          onAdd={handleAddCustomModule}
-        />
-      )}
-
       {/* Module Prompt Edit Modal */}
       {editingModuleId && (
         <ModulePromptEditModal
+          key={`${editingModuleId}:${editingModuleType}:${editingModuleLabel ?? ''}:${editingModuleModel ?? ''}`}
           isOpen={!!editingModuleId}
           onClose={() => setEditingModuleId(null)}
           moduleId={editingModuleId}
@@ -1211,7 +1265,7 @@ export default function SettingsPage() {
           onReset={() => {
             setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt: undefined, model: undefined } : m))
             setEditingModuleId(null)
-            toast.success('已恢复默认配置')
+            toast.success('已恢复预置配置')
           }}
         />
       )}
@@ -1221,114 +1275,6 @@ export default function SettingsPage() {
         isOpen={showAbout}
         onClose={() => setShowAbout(false)}
       />
-    </div>
-  )
-}
-
-// Modal for adding custom module
-interface AddCustomModuleModalProps {
-  isOpen: boolean
-  onClose: () => void
-  onAdd: (name: string, prompt: string) => void
-}
-
-function AddCustomModuleModal({ isOpen, onClose, onAdd }: AddCustomModuleModalProps) {
-  const { settings } = useSettings()
-  const [name, setName] = useState('')
-  const [description, setDescription] = useState('')
-  const [prompt, setPrompt] = useState('')
-  const [isGenerating, setIsGenerating] = useState(false)
-
-  const [hasInitialized, setHasInitialized] = useState(false)
-
-  useEffect(() => {
-    if (isOpen && !hasInitialized) {
-      setName('')
-      setDescription('')
-      setPrompt('')
-      setHasInitialized(true)
-    }
-    if (!isOpen) {
-      setHasInitialized(false)
-    }
-  }, [isOpen, hasInitialized])
-
-  const handleGenerate = async () => {
-    if (!description.trim() || !settings.apiKey) return
-    setIsGenerating(true)
-    try {
-      const generated = await generatePromptFromDescription(description, settings)
-      if (generated) {
-        setPrompt(generated)
-      } else {
-        toast.error('生成失败，请检查 API 配置或稍后重试')
-      }
-    } catch (err) {
-      toast.error('生成失败：' + (err instanceof Error ? err.message : '未知错误'))
-    }
-    setIsGenerating(false)
-  }
-
-  if (!isOpen) return null
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-[var(--color-surface)] rounded-lg border border-[var(--color-border)] shadow-lg w-full max-w-2xl max-h-[80vh] overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)]">
-          <h3 className="font-medium text-[var(--color-ink)]">添加自定义模块</h3>
-          <button onClick={onClose} className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]">✕</button>
-        </div>
-        <div className="p-4 space-y-4">
-          <div>
-            <label className="block text-sm text-[var(--color-ink-light)] mb-1">模块名称</label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="例如：诗歌润色"
-              className="w-full px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm"
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-[var(--color-ink-light)] mb-1">提示词描述（可选）</label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="描述你想要的提示词效果，点击右侧按钮让AI生成..."
-                className="flex-1 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm"
-              />
-              <button
-                onClick={handleGenerate}
-                disabled={!description.trim() || !settings.apiKey || isGenerating}
-                className="px-3 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5 disabled:opacity-40"
-              >
-                {isGenerating ? '生成中...' : 'AI生成'}
-              </button>
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm text-[var(--color-ink-light)] mb-1">提示词内容</label>
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="输入系统提示词，定义AI的角色和任务..."
-              className="w-full h-48 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm resize-none"
-            />
-          </div>
-        </div>
-        <div className="flex justify-end gap-2 px-4 py-3 border-t border-[var(--color-border)]">
-          <button onClick={onClose} className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm">取消</button>
-          <button
-            onClick={() => { if (name.trim() && prompt.trim()) { onAdd(name.trim(), prompt.trim()) } }}
-            disabled={!name.trim() || !prompt.trim()}
-            className="px-4 py-2 bg-[var(--color-accent)] text-white rounded-lg text-sm disabled:opacity-40"
-          >
-            添加
-          </button>
-        </div>
-      </div>
     </div>
   )
 }
@@ -1360,30 +1306,16 @@ function ModulePromptEditModal({
   onReset,
 }: ModulePromptEditModalProps) {
   const { settings } = useSettings()
+  const customPrompt = moduleType === 'custom' ? customPromptService.get(moduleId) : null
+  const defaultPrompt = getDefaultPromptForModule(moduleType)
   const [prompt, setPrompt] = useState(currentPrompt || getDefaultPromptForModule(moduleType) || '')
   const [model, setModel] = useState(currentModel || '')
   const [label, setLabel] = useState(currentLabel || '')
-  const [useRag, setUseRag] = useState(true)
-  const [ragFallback, setRagFallback] = useState(true)
+  const [useRag, setUseRag] = useState(customPrompt?.useRag ?? false)
+  const [ragFallback, setRagFallback] = useState(customPrompt?.ragFallback ?? false)
   const [description, setDescription] = useState('')
   const [isGenerating, setIsGenerating] = useState(false)
   const [showDefault, setShowDefault] = useState(false)
-
-  const defaultPrompt = getDefaultPromptForModule(moduleType)
-  const effectivePrompt = prompt || defaultPrompt || ''
-
-  useEffect(() => {
-    // If no custom prompt, fill with default prompt so user can see it
-    setPrompt(currentPrompt || defaultPrompt || '')
-    setModel(currentModel || '')
-    setLabel(currentLabel || '')
-    if (moduleType === 'custom') {
-      const cp = customPromptService.get(moduleId)
-      setUseRag(cp?.useRag ?? true)
-      setRagFallback(cp?.ragFallback ?? true)
-    }
-    setShowDefault(false)
-  }, [currentPrompt, currentModel, currentLabel, defaultPrompt, moduleType, moduleId])
 
   const handleGenerate = async () => {
     if (!description.trim() || !settings.apiKey) return
@@ -1412,7 +1344,7 @@ function ModulePromptEditModal({
             <h3 className="font-medium text-[var(--color-ink)]">编辑模块：{moduleLabel}</h3>
             {defaultPrompt && (
               <p className="text-xs text-[var(--color-ink-faint)] mt-0.5">
-                {currentPrompt ? '已使用自定义提示词' : '使用默认提示词'}
+                {currentPrompt ? '已保存当前提示词' : '当前使用预置提示词'}
               </p>
             )}
           </div>
@@ -1435,12 +1367,12 @@ function ModulePromptEditModal({
                   onClick={() => setLabel('')}
                   className="text-xs text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] underline"
                 >
-                  恢复默认
+                  清空覆盖
                 </button>
               )}
             </div>
             <p className="text-xs text-[var(--color-ink-faint)] mt-1">
-              自定义名称，留空使用默认名称「{moduleLabel}」
+              模块显示名称可单独编辑；留空则沿用当前列表名称「{moduleLabel}」
             </p>
           </div>
 
@@ -1509,7 +1441,7 @@ function ModulePromptEditModal({
                   onClick={() => setModel('')}
                   className="text-xs text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] underline"
                 >
-                  使用默认
+                  跟随主模型
                 </button>
               )}
             </div>
@@ -1528,7 +1460,7 @@ function ModulePromptEditModal({
                     onClick={() => setShowDefault(!showDefault)}
                     className="text-xs text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] underline"
                   >
-                    {showDefault ? '隐藏默认提示词' : '查看默认提示词'}
+                    {showDefault ? '隐藏预置提示词' : '查看预置提示词'}
                   </button>
                 </div>
               )}
@@ -1536,12 +1468,12 @@ function ModulePromptEditModal({
             <textarea
               value={prompt}
               onChange={(e) => { setPrompt(e.target.value); setShowDefault(false); }}
-              placeholder={defaultPrompt ? "输入自定义提示词覆盖默认，或留空使用默认..." : "输入系统提示词..."}
+              placeholder={defaultPrompt ? "输入该模块的提示词；留空则沿用当前预置内容..." : "输入该模块的提示词..."}
               className="w-full h-48 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm resize-none focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
             />
             {showDefault && defaultPrompt && (
               <div className="mt-2 p-3 bg-[var(--color-paper-warm)] rounded-lg border border-[var(--color-border)]">
-                <p className="text-xs text-[var(--color-ink-faint)] mb-1">默认提示词：</p>
+                <p className="text-xs text-[var(--color-ink-faint)] mb-1">预置提示词：</p>
                 <pre className="text-xs text-[var(--color-ink)] whitespace-pre-wrap">{defaultPrompt}</pre>
               </div>
             )}
@@ -1554,7 +1486,7 @@ function ModulePromptEditModal({
               disabled={!currentPrompt && !currentModel && !currentLabel}
               className="px-4 py-2 text-sm text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] disabled:opacity-30"
             >
-              恢复默认
+              恢复预置
             </button>
           ) : (
             <div />
@@ -1578,3 +1510,4 @@ function ModulePromptEditModal({
     </div>
   )
 }
+

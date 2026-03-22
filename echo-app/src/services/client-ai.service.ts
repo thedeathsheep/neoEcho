@@ -1,9 +1,10 @@
+import { devLog } from '@/lib/dev-log'
 import type { Settings } from '@/lib/settings-context'
 import { BUILTIN_RIBBON_MODULES } from '@/lib/settings-context'
-import { devLog } from '@/lib/dev-log'
-import { sanitizeForDisplay } from '@/lib/utils/text-sanitize'
 import type { AIMode, EchoItem, RagCandidate } from '@/types'
 import type { RibbonModuleType } from '@/types'
+import type { WritingAssistKind, WritingAssistResult, WritingSuggestion } from '@/types'
+
 import { customPromptService } from './custom-prompt.service'
 
 interface ValidateResult {
@@ -19,6 +20,11 @@ interface ChatMessage {
 
 interface ChatCompletionResponse {
   choices: { message: { content: string }; finish_reason?: string }[]
+}
+
+export interface DetailGenerationResult {
+  text: string
+  usedRag: boolean
 }
 
 interface ModelsResponse {
@@ -229,6 +235,324 @@ function getSystemPromptForRibbonModule(type: RibbonModuleType, id: string, cust
   return DEFAULT_SYSTEM_PROMPTS.imagery
 }
 
+function getCustomPromptOptions(id: string): {
+  useRag: boolean
+  ragFallback: boolean
+  behavior: 'freeform' | 'term_list' | 'guided_terms' | 'entity_explain'
+  content: string
+  name: string
+  description: string
+} {
+  const prompt = customPromptService.get(id)
+  return {
+    useRag: prompt?.useRag ?? false,
+    ragFallback: prompt?.ragFallback ?? false,
+    behavior: prompt?.behavior ?? 'freeform',
+    content: prompt?.content?.trim() ?? '',
+    name: prompt?.name?.trim() ?? '',
+    description: prompt?.description?.trim() ?? '',
+  }
+}
+
+function isParagraphOutputModule(module: { type: RibbonModuleType; id: string }): boolean {
+  if (module.type !== 'custom') return false
+  return customPromptService.get(module.id)?.outputShape === 'paragraph'
+}
+
+function isEntityExplanationModule(module: { type: RibbonModuleType; id: string; label?: string }): boolean {
+  if (module.type !== 'custom') return false
+  const prompt = customPromptService.get(module.id)
+  return (prompt?.behavior ?? 'freeform') === 'entity_explain'
+}
+
+function isTermListModule(module: { type: RibbonModuleType; id: string; label?: string }): boolean {
+  if (module.type !== 'custom') return false
+  const prompt = customPromptService.get(module.id)
+  return (prompt?.behavior ?? 'freeform') === 'term_list'
+}
+
+function isGuidedTermsModule(module: { type: RibbonModuleType; id: string; label?: string }): boolean {
+  if (module.type !== 'custom') return false
+  const prompt = customPromptService.get(module.id)
+  return (prompt?.behavior ?? 'freeform') === 'guided_terms'
+}
+
+function isLongFormModule(module: { type: RibbonModuleType; id: string }, rawText: string): boolean {
+  if (module.type !== 'custom') return false
+  const prompt = customPromptService.get(module.id)
+  if (prompt?.outputShape === 'paragraph') return true
+  const normalized = rawText.trim()
+  if (normalized.includes('\n\n')) return true
+  return normalized.length >= 120
+}
+
+function makeRibbonSummary(text: string, maxLen: number = 54): string {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (!normalized) return ''
+  const firstParagraph = normalized.split(/\n{2,}/)[0]?.trim() ?? normalized
+  const sentenceMatch = firstParagraph.match(/^(.{0,72}?[。！？.!?])/u)
+  const base = (sentenceMatch?.[1] ?? firstParagraph).trim()
+  if (base.length <= maxLen) return base
+
+  const chunk = base.slice(0, maxLen)
+  const boundary = Math.max(
+    chunk.lastIndexOf('，'),
+    chunk.lastIndexOf('。'),
+    chunk.lastIndexOf('！'),
+    chunk.lastIndexOf('？'),
+    chunk.lastIndexOf(','),
+    chunk.lastIndexOf('.'),
+  )
+  const clipped = boundary >= 18 ? chunk.slice(0, boundary + 1).trim() : chunk.trim()
+  return `${clipped}...`
+}
+
+function buildModuleEchoItems(
+  module: { type: RibbonModuleType; id: string; label?: string },
+  sourceLabel: string,
+  rawText: string,
+  blockId?: string,
+): EchoItem[] {
+  const createdAt = new Date().toISOString()
+  const moduleLabel = module.label?.trim() || sourceLabel
+  const trimmed = rawText.trim()
+  if (!trimmed) return []
+
+  if (isLongFormModule(module, trimmed)) {
+    const ribbonText = makeRibbonSummary(trimmed)
+    if (!ribbonText) return []
+    return [
+      {
+        id: `ai-${module.id}-${Date.now()}-0`,
+        type: 'lit',
+        content: ribbonText,
+        ribbonText,
+        detailText: trimmed,
+        source: sourceLabel,
+        moduleId: module.id,
+        moduleLabel,
+        blockId,
+        createdAt,
+      },
+    ]
+  }
+
+  return trimmed
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(0, 5)
+    .map((content, index) => ({
+      id: `ai-${module.id}-${Date.now()}-${index}`,
+      type: 'lit' as const,
+      content,
+      ribbonText: content,
+      detailText: undefined,
+      source: sourceLabel,
+      moduleId: module.id,
+      moduleLabel,
+      blockId,
+      createdAt,
+    }))
+}
+
+function buildParagraphModuleUserPrompt(
+  context: string,
+  ragResults: EchoItem[],
+  sourceLabel: string,
+): string {
+  const contextPreview = context.trim().slice(0, 700)
+  const references = ragResults
+    .slice(0, 3)
+    .map((item, index) => {
+      const snippet = (item.shortSummary ?? item.originalText ?? item.content ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120)
+      return snippet ? `${index + 1}. ${snippet}` : ''
+    })
+    .filter(Boolean)
+    .join('\n')
+
+  return [
+    `模块名称：${sourceLabel}`,
+    contextPreview ? `当前写作片段：\n${contextPreview}` : '',
+    references ? `可参考的相关材料：\n${references}` : '',
+    '请输出严格 JSON，格式如下：',
+    '{"ribbonText":"顶部织带摘要，不超过36字","detailText":"1-2段完整中文正文，总长度不超过220字"}',
+    '要求：',
+    '- ribbonText 必须短、稳、适合顶部织带单元展示',
+    '- detailText 必须完整，但不要写成长篇，不要编号，不要标题',
+    '- 只输出 JSON，不要解释，不要 markdown 代码块',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function buildEntityExplanationUserPrompt(context: string, sourceLabel: string): string {
+  const contextPreview = context.trim().slice(0, 420)
+  return [
+    `模块名称：${sourceLabel}`,
+    contextPreview ? `当前用户片段：\n${contextPreview}` : '',
+    '任务：先从当前用户片段里识别 1-2 个明确的实体词或专名（如人名、地名、书名、典故、制度、器物、术语），再选择其中最值得解释的 1 个。',
+    '不要解释整段文本的出处，不要概括整段内容，只解释你识别出的那个实体。',
+    '如果片段里没有明确、值得解释的实体，请输出严格 JSON：{"ribbonText":"","detailText":""}',
+    '如果有可解释实体，请输出严格 JSON，格式如下：',
+    '{"ribbonText":"实体词：不超过24字的简要释义","detailText":"1段完整中文，80-160字，解释该实体是什么、来自哪里、为什么相关"}',
+    '要求：',
+    '- ribbonText 必须是词条型短句，直接点名实体，不要写成整段摘要',
+    '- detailText 只解释该实体，不延伸解释整段剧情',
+    '- 只输出 JSON，不要编号，不要 markdown，不要前后缀',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function buildTermListUserPrompt(context: string, sourceLabel: string, criteriaText?: string): string {
+  const contextPreview = context.trim().slice(0, 420)
+  return [
+    `模块名称：${sourceLabel}`,
+    criteriaText ? `只提取符合这条要求的词：${criteriaText}` : '',
+    contextPreview ? `当前用户片段：\n${contextPreview}` : '',
+    '任务：从当前用户片段中提取 1-5 个真正符合上述要求的词汇或短语。',
+    '不要写成长句，不要改写整段，不要解释出处。',
+    '输出要求：',
+    '- 每行只输出一个词或短语',
+    '- 每项尽量控制在 2-10 个字',
+    '- 允许保守，不确定时宁可少给',
+    '- 如果片段里没有符合要求的词，就输出空字符串',
+    '- 只输出结果列表，不要编号，不要解释，不要前后缀',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function buildGuidedTermsUserPrompt(context: string, sourceLabel: string, criteriaText?: string): string {
+  const contextPreview = context.trim().slice(0, 420)
+  return [
+    `模块名称：${sourceLabel}`,
+    criteriaText ? `请围绕这条要求给词：${criteriaText}` : '',
+    contextPreview ? `当前用户片段：\n${contextPreview}` : '',
+    '任务：基于当前用户片段，联想 1-5 个与之适配、且明显属于目标领域的专业词汇或短语。',
+    '这些词不必逐字出现在原文里，但必须和当前片段的情境、气氛、动作或身体感受有关。',
+    '不要写成长句，不要解释，不要改写整段，不要输出泛词。',
+    '输出要求：',
+    '- 每行只输出一个词或短语',
+    '- 每项尽量控制在 2-12 个字',
+    '- 宁可少给，也不要给泛词、空词、人物称呼、时间词、地名等非目标领域词汇',
+    '- 如果联想不到合适的专业词汇，就输出空字符串',
+    '- 只输出结果列表，不要编号，不要解释，不要前后缀',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function inferTermListDomain(criteriaText: string): 'medical' | 'generic' {
+  const normalized = criteriaText.toLowerCase()
+  if (/医疗|医学|医药|医生|症状|疾病|病理|检查|治疗|药|诊断|临床/.test(normalized)) {
+    return 'medical'
+  }
+  return 'generic'
+}
+
+function normalizeTermListOutput(rawText: string, criteriaText: string): string {
+  const domain = inferTermListDomain(criteriaText)
+  const lines = rawText
+    .split('\n')
+    .map((line) => line.replace(/^[\-\d\.\)\s]+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 8)
+
+  if (domain !== 'medical') {
+    return lines.slice(0, 5).join('\n')
+  }
+
+  const medicalPattern = /痛|疼|炎|瘤|癌|病|症|征|药|疗|诊|检|查|术|针|剂|孕|产|呼吸|胸|腹|头|脑|心|肺|肝|脾|胃|肠|肾|血|压|脉|骨|肌|关节|感染|创伤|康复|发热|咳|眩晕|水肿|心率|血糖|血脂|贫血|过敏/
+  const filtered = lines.filter((line) => medicalPattern.test(line))
+  return filtered.slice(0, 5).join('\n')
+}
+
+function normalizeGuidedTermsOutput(rawText: string, criteriaText: string): string {
+  const domain = inferTermListDomain(criteriaText)
+  const lines = rawText
+    .split('\n')
+    .map((line) => line.replace(/^[\-\d\.\)\s]+/, '').trim())
+    .filter(Boolean)
+    .slice(0, 8)
+
+  if (domain !== 'medical') {
+    return lines.slice(0, 5).join('\n')
+  }
+
+  const medicalPattern = /痛|疼|炎|瘤|癌|病|症|征|药|疗|诊|检|查|术|针|剂|孕|产|呼吸|胸|腹|头|脑|心|肺|肝|脾|胃|肠|肾|血|压|脉|骨|肌|关节|感染|创伤|康复|发热|咳|眩晕|水肿|心率|血糖|血脂|贫血|过敏|焦虑|抑郁|失眠|乏力|麻木|痉挛|缺氧|休克|炎症|外伤|创口|绷带|缝合/
+  const bannedGenericPattern = /母亲|父亲|日历|时刻|时间|日期|果盘|海风|落叶|小鸟|爱奥尼亚|半岛|海面|船票/
+  const filtered = lines.filter((line) => medicalPattern.test(line) && !bannedGenericPattern.test(line))
+  return filtered.slice(0, 5).join('\n')
+}
+
+function parseParagraphModuleResult(
+  rawText: string,
+  module: { type: RibbonModuleType; id: string; label?: string },
+  sourceLabel: string,
+  blockId?: string,
+): EchoItem[] {
+  const trimmed = rawText.trim()
+  if (!trimmed) return []
+
+  try {
+    const jsonText = extractJsonBlock(trimmed)
+    const parsed = JSON.parse(jsonText) as { ribbonText?: unknown; detailText?: unknown }
+    const ribbonText = typeof parsed.ribbonText === 'string'
+      ? parsed.ribbonText.trim().replace(/^实体词[:：]\s*/u, '')
+      : ''
+    const detailText = typeof parsed.detailText === 'string' ? parsed.detailText.trim() : ''
+    const safeRibbon = ribbonText || makeRibbonSummary(detailText)
+    const safeDetail = detailText || trimmed
+    if (!safeRibbon) return []
+    return [
+      {
+        id: `ai-${module.id}-${Date.now()}-0`,
+        type: 'lit',
+        content: safeRibbon,
+        ribbonText: safeRibbon,
+        detailText: safeDetail,
+        source: sourceLabel,
+        moduleId: module.id,
+        moduleLabel: module.label?.trim() || sourceLabel,
+        blockId,
+        createdAt: new Date().toISOString(),
+      },
+    ]
+  } catch {
+    return buildModuleEchoItems(module, sourceLabel, trimmed, blockId)
+  }
+}
+
+function buildDetailUserPrompt(
+  item: EchoItem,
+  context: string,
+  referenceText?: string,
+): string {
+  const focus = (item.originalText ?? item.content ?? '').trim()
+  const source = (item.source ?? '').trim()
+  const contextPreview = context.trim().slice(0, 800)
+  const referencePreview = (referenceText ?? '').trim().slice(0, 1200)
+
+  return [
+    '请围绕这条回声做解释或背景补充。',
+    focus ? `回声内容：\n${focus}` : '',
+    source ? `来源：${source}` : '',
+    contextPreview ? `当前写作上下文：\n${contextPreview}` : '',
+    referencePreview ? `可用参考：\n${referencePreview}` : '',
+    '输出要求：',
+    '- 输出 1-3 段完整中文正文',
+    '- 不要编号、不要标题、不要项目符号',
+    '- 重点解释概念、典故、语义或背景，而不是继续生成新的织带短句',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
 /** Map ribbon module type to AIMode for user prompt building. */
 function ribbonTypeToAIMode(type: RibbonModuleType): AIMode {
   if (type === 'custom' || type === 'quick') return 'custom'
@@ -312,7 +636,8 @@ export async function generatePromptFromDescription(
 }
 
 /** Get display label for a ribbon module (shown in ribbon cell). */
-function getModuleDisplayLabel(type: RibbonModuleType, id: string): string {
+export function getModuleDisplayLabel(type: RibbonModuleType, id: string, labelOverride?: string): string {
+  if (labelOverride?.trim()) return labelOverride.trim()
   if (type === 'custom') {
     const prompt = customPromptService.get(id)
     if (prompt?.name) return `自定义-${prompt.name}`
@@ -334,6 +659,12 @@ function getModuleDisplayLabel(type: RibbonModuleType, id: string): string {
     return labels[type] || 'AI 生成'
   }
   return 'AI 生成'
+}
+
+function withDetailGuardrails(prompt: string): string {
+  const trimmed = prompt.trim()
+  if (!trimmed) return trimmed
+  return `${trimmed}\n\n【详情解释输出约束】\n- 输出 1-3 段完整中文正文\n- 不要短句列表，不要编号，不要标题\n- 重点解释概念、出处、背景、典故或语义`
 }
 
 const RAG_CORRECT_SYSTEM = `你是文本校对助手。知识库检索片段可能含OCR错误、断行异常、断头标点、多余空格等。请校对为符合正常文本表现的版本，保持原意，仅修正格式和明显错误。
@@ -689,7 +1020,7 @@ export async function generateEchoes(
 
   const mode = settings.aiMode ?? 'imagery'
   const systemPrompt = getSystemPrompt(mode)
-  const userContent = buildUserPromptByMode(context, ragResults, mode)
+  const userContent = buildUserPromptByMode(context, [], mode)
 
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
@@ -772,6 +1103,84 @@ export interface ModuleGenerationResult {
   error?: string
 }
 
+export function normalizeDetailError(err: unknown): string {
+  if (!(err instanceof Error)) return '解释生成失败'
+  if (err.message === 'DETAIL_TIMEOUT') return '解释请求超时'
+  if (err.message === 'DETAIL_ABORTED') return '解释请求已取消'
+  return '解释生成失败'
+}
+
+export async function generateDetailForEcho(
+  item: EchoItem,
+  context: string,
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
+  module: { id: string; prompt?: string; model?: string },
+  options?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<DetailGenerationResult> {
+  if (!settings.apiKey) {
+    return { text: '', usedRag: false }
+  }
+
+  const customPrompt = customPromptService.get(module.id)
+  const systemPrompt = withDetailGuardrails(
+    module.prompt?.trim() || customPrompt?.content?.trim() || DEFAULT_SYSTEM_PROMPTS.imagery,
+  )
+  const modelToUse = module.model?.trim() || settings.model
+  const customOptions = getCustomPromptOptions(module.id)
+  const sourceReference =
+    customOptions.useRag && item.source !== 'AI'
+      ? (item.detailText ?? item.originalText ?? item.content ?? '').trim()
+      : ''
+
+  const userContent = buildDetailUserPrompt(item, context, sourceReference)
+
+  let res: Response
+  try {
+    res = await fetch(apiUrl(settings.baseUrl, '/chat/completions'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${settings.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: modelToUse,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent },
+        ],
+        temperature: 0.3,
+        max_tokens: 768,
+      }),
+      signal: withTimeout(options?.signal, options?.timeoutMs ?? 20_000),
+    })
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      throw new Error('DETAIL_TIMEOUT')
+    }
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('DETAIL_ABORTED')
+    }
+    if (err instanceof TypeError) {
+      throw new Error('NETWORK_ERROR')
+    }
+    throw err instanceof Error ? err : new Error('DETAIL_ERROR')
+  }
+
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) throw new Error('API_KEY_INVALID')
+    if (res.status === 429) throw new Error('RATE_LIMITED')
+    if (res.status >= 500) throw new Error('API_SERVER_ERROR')
+    throw new Error(`API_ERROR_${res.status}`)
+  }
+
+  const data = (await res.json()) as ChatCompletionResponse
+  const text = (data.choices?.[0]?.message?.content ?? '').trim()
+  return {
+    text,
+    usedRag: Boolean(sourceReference),
+  }
+}
+
 /**
  * Generate echoes for a single ribbon module (AI mode or custom prompt by id).
  * Used when multiple modules are enabled; each module can be called independently.
@@ -781,7 +1190,7 @@ export async function generateEchoesForModule(
   context: string,
   ragResults: EchoItem[],
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model' | 'ribbonFilterModel'>,
-  module: { type: RibbonModuleType; id: string; prompt?: string; model?: string },
+  module: { type: RibbonModuleType; id: string; prompt?: string; model?: string; label?: string },
   blockId?: string,
   options?: { allowRagFallback?: boolean; skipRagPreprocess?: boolean; signal?: AbortSignal; timeoutMs?: number }
 ): Promise<ModuleGenerationResult> {
@@ -793,17 +1202,69 @@ export async function generateEchoesForModule(
 
   const systemPrompt = getSystemPromptForRibbonModule(module.type, module.id, module.prompt)
   const mode = ribbonTypeToAIMode(module.type)
+  const customOptions = module.type === 'custom' ? getCustomPromptOptions(module.id) : null
+  const paragraphOutput = isParagraphOutputModule(module)
 
   // For custom modules, try RAG context first if allowed
   let userContent: string
   let usedRag = false
-  let ragForPrompt = ragResults
+  let ragForPrompt: EchoItem[] = []
 
   if (module.type === 'quick') {
     // Quick modules don't use RAG results
     userContent = `当前文本：\n${context}\n\n请根据以上文本，直接给出你的回应。`
-  } else if (ragResults.length > 0 && (module.type.startsWith('ai:') || (module.type === 'custom' && options?.allowRagFallback))) {
-    // AI modules and custom (with RAG fallback): correct → summarize (for structured context) → build prompt
+  } else if (isTermListModule(module)) {
+    ragForPrompt = []
+    const criteriaText = [customOptions?.name, customOptions?.description, customOptions?.content]
+      .filter(Boolean)
+      .join(' / ')
+      .slice(0, 220)
+    userContent = buildTermListUserPrompt(
+      context,
+      getModuleDisplayLabel(module.type, module.id, module.label),
+      criteriaText,
+    )
+  } else if (isGuidedTermsModule(module)) {
+    ragForPrompt = []
+    const criteriaText = [customOptions?.name, customOptions?.description, customOptions?.content]
+      .filter(Boolean)
+      .join(' / ')
+      .slice(0, 220)
+    userContent = buildGuidedTermsUserPrompt(
+      context,
+      getModuleDisplayLabel(module.type, module.id, module.label),
+      criteriaText,
+    )
+  } else if (paragraphOutput && isEntityExplanationModule(module)) {
+    ragForPrompt = []
+    userContent = buildEntityExplanationUserPrompt(
+      context,
+      getModuleDisplayLabel(module.type, module.id, module.label),
+    )
+  } else if (paragraphOutput) {
+    if (ragResults.length > 0 && customOptions?.useRag) {
+      usedRag = true
+      const alreadySummarized = ragResults.every((r) => (r.shortSummary ?? '').trim().length > 0)
+      ragForPrompt = alreadySummarized
+        ? ragResults
+        : await summarizeRagChunks(ragResults, settings, options?.signal)
+    } else {
+      ragForPrompt = []
+    }
+    userContent = buildParagraphModuleUserPrompt(
+      context,
+      ragForPrompt,
+      getModuleDisplayLabel(module.type, module.id, module.label),
+    )
+  } else if (
+    ragResults.length > 0 &&
+    module.type === 'custom' &&
+    (
+      customOptions?.useRag ||
+      (options?.allowRagFallback && customOptions?.ragFallback)
+    )
+  ) {
+    // Custom modules opt into RAG explicitly; built-in AI modules default to user-context-only prompts.
     usedRag = true
     const alreadySummarized = ragResults.every((r) => (r.shortSummary ?? '').trim().length > 0)
     if (!options?.skipRagPreprocess) {
@@ -814,7 +1275,7 @@ export async function generateEchoesForModule(
     }
     userContent = buildUserPromptByMode(context, ragForPrompt, mode)
   } else {
-    userContent = buildUserPromptByMode(context, ragResults, mode)
+    userContent = buildUserPromptByMode(context, [], mode)
   }
 
   const messages: ChatMessage[] = [
@@ -826,14 +1287,14 @@ export async function generateEchoesForModule(
   const modelToUse = module.model?.trim() || settings.model
   const maxTokens =
     module.type === 'custom'
-      ? 256
+      ? (paragraphOutput ? 240 : 320)
       : module.type === 'quick'
         ? 192
         : module.type === 'ai:quote'
           ? 192
           : 256
 
-  const sourceLabel = getModuleDisplayLabel(module.type, module.id)
+  const sourceLabel = getModuleDisplayLabel(module.type, module.id, module.label)
   const fetchStart = Date.now()
 
   debugIngest('H1', 'client-ai.service.ts:generateEchoesForModule:start', 'chat.completions start', {
@@ -862,7 +1323,7 @@ export async function generateEchoesForModule(
       body: JSON.stringify({
         model: modelToUse,
         messages,
-        temperature: module.type === 'custom' ? 0.3 : 0.85,
+        temperature: module.type === 'custom' ? (paragraphOutput ? 0.2 : 0.3) : 0.85,
         max_tokens: maxTokens,
       }),
       signal: withTimeout(options?.signal, options?.timeoutMs ?? 12000),
@@ -934,14 +1395,6 @@ export async function generateEchoesForModule(
     finishReason: finishReason ?? '(unknown)',
   })
 
-  devLog.push('ai', `generateEchoesForModule [${sourceLabel}] response`, {
-    moduleId: module.id,
-    textLen: text.length,
-    finishReason: finishReason ?? '(unknown)',
-    truncated: finishReason === 'length',
-    preview: text.slice(0, 120) + (text.length > 120 ? '…' : ''),
-  })
-
   if (text.length === 0) {
     devLog.push('ai', `generateEchoesForModule [${sourceLabel}] empty API response`, {
       moduleId: module.id,
@@ -949,19 +1402,36 @@ export async function generateEchoesForModule(
     return { items: [], usedRag, error: 'API返回空内容' }
   }
 
-  const items = text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .slice(0, 5)
-    .map((content, i) => ({
-      id: `ai-${module.id}-${Date.now()}-${i}`,
-      type: 'lit' as const,
-      content,
-      source: sourceLabel,
-      blockId,
-      createdAt: new Date().toISOString(),
-    }))
+  const normalizedText =
+    isTermListModule(module)
+      ? normalizeTermListOutput(
+          text,
+          [customOptions?.name, customOptions?.description, customOptions?.content].filter(Boolean).join(' / '),
+        )
+      : isGuidedTermsModule(module)
+        ? normalizeGuidedTermsOutput(
+            text,
+            [customOptions?.name, customOptions?.description, customOptions?.content].filter(Boolean).join(' / '),
+          )
+      : text
+
+  devLog.push('ai', `generateEchoesForModule [${sourceLabel}] response`, {
+    moduleId: module.id,
+    textLen: text.length,
+    finishReason: finishReason ?? '(unknown)',
+    truncated: finishReason === 'length',
+    preview: text.slice(0, 120) + (text.length > 120 ? '…' : ''),
+    normalizedPreview: normalizedText.slice(0, 120) + (normalizedText.length > 120 ? '…' : ''),
+    normalizedEmpty: normalizedText.trim().length === 0,
+  })
+
+  if (normalizedText.trim().length === 0) {
+    return { items: [], usedRag }
+  }
+
+  const items = paragraphOutput
+    ? parseParagraphModuleResult(normalizedText, module, sourceLabel, blockId)
+    : buildModuleEchoItems(module, sourceLabel, normalizedText, blockId)
 
   return { items, usedRag }
 }
@@ -979,7 +1449,7 @@ export async function generateBatchEchoesForModules(
   context: string,
   ragForAi: EchoItem[],
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model' | 'ribbonFilterModel'>,
-  modules: Array<{ type: RibbonModuleType; id: string; prompt?: string; model?: string }>,
+  modules: Array<{ type: RibbonModuleType; id: string; prompt?: string; model?: string; label?: string }>,
   blockId?: string,
   options?: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<{ byModuleId: Record<string, EchoItem[]> }> {
@@ -989,14 +1459,15 @@ export async function generateBatchEchoesForModules(
   const allowedModules = modules.filter((m) => m.type.startsWith('ai:') || m.type === 'custom')
   if (allowedModules.length === 0) return { byModuleId: {} }
 
-  const maxTokens = Math.min(512, Math.max(256, allowedModules.length * 160))
+  const maxTokens = Math.min(2048, Math.max(512, allowedModules.length * 400))
   const timeoutMs = options?.timeoutMs ?? 12_000
 
   const moduleSections = allowedModules
     .map((m) => {
-      const sourceLabel = getModuleDisplayLabel(m.type, m.id)
+      const sourceLabel = getModuleDisplayLabel(m.type, m.id, m.label)
       const mode = ribbonTypeToAIMode(m.type)
-      const ragForPrompt = m.type.startsWith('ai:') ? ragForAi : []
+      const customOptions = m.type === 'custom' ? getCustomPromptOptions(m.id) : null
+      const ragForPrompt = m.type === 'custom' && customOptions?.useRag ? ragForAi : []
 
       const systemPrompt = getSystemPromptForRibbonModule(m.type, m.id, m.prompt)
       const userPrompt = buildUserPromptByMode(context, ragForPrompt, mode)
@@ -1095,16 +1566,415 @@ Rules:
     const lines = Array.isArray(arr) ? arr.filter((x) => typeof x === 'string').map((x) => (x as string).trim()) : []
     const usable = lines.filter((x) => x.length > 0).slice(0, 5)
 
-    const sourceLabel = getModuleDisplayLabel(m.type, m.id)
+    const sourceLabel = getModuleDisplayLabel(m.type, m.id, m.label)
     byModuleId[m.id] = usable.map((content, idx) => ({
       id: `ai-batch-${m.type}-${m.id}-${Date.now()}-${idx}`,
       type: 'lit',
       content,
+      ribbonText: content,
       source: sourceLabel,
+      moduleId: m.id,
+      moduleLabel: m.label?.trim() || sourceLabel,
       blockId,
       createdAt: new Date().toISOString(),
     }))
   }
 
   return { byModuleId }
+}
+
+function extractJsonBlock(raw: string): string {
+  const startIdx = raw.indexOf('{')
+  const endIdx = raw.lastIndexOf('}')
+  if (startIdx >= 0 && endIdx > startIdx) return raw.slice(startIdx, endIdx + 1)
+  return raw
+}
+
+function normalizeWritingSuggestions(value: unknown): WritingSuggestion[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item, index) => {
+      if (typeof item === 'string') {
+        const text = item.trim()
+        return text
+          ? {
+              id: `fallback-${index}`,
+              title: text.slice(0, 18),
+              detail: text,
+              severity: 'watch' as const,
+            }
+          : null
+      }
+      if (!item || typeof item !== 'object') return null
+      const record = item as Record<string, unknown>
+      const title = typeof record.title === 'string' ? record.title.trim() : ''
+      const detail = typeof record.detail === 'string' ? record.detail.trim() : ''
+      const tag = typeof record.tag === 'string' ? record.tag.trim() : undefined
+      const severity = record.severity === 'gentle' || record.severity === 'watch' || record.severity === 'strong'
+        ? record.severity
+        : undefined
+      if (!title && !detail) return null
+      return {
+        id: `suggestion-${index}-${title || detail}`.slice(0, 64),
+        title: title || detail.slice(0, 18),
+        detail: detail || title,
+        tag,
+        severity,
+      }
+    })
+    .filter((item): item is WritingSuggestion => item != null)
+}
+
+function localRevisionRadar(context: string): WritingSuggestion[] {
+  const text = context.replace(/\s+/g, ' ').trim()
+  if (!text) return []
+
+  const suggestions: WritingSuggestion[] = []
+  const repeated = new Map<string, number>()
+  const words = text.match(/[\u4e00-\u9fa5]{2,4}|[A-Za-z]{4,}/g) ?? []
+  for (const word of words) {
+    repeated.set(word, (repeated.get(word) ?? 0) + 1)
+  }
+  const topRepeated = [...repeated.entries()]
+    .filter(([, count]) => count >= 3)
+    .sort((a, b) => b[1] - a[1])[0]
+
+  if (topRepeated) {
+    suggestions.push({
+      id: 'local-repeat',
+      title: '重复意象偏多',
+      detail: `“${topRepeated[0]}”在这一段里反复出现，试着换成动作、触感或具体物件来分担表达。`,
+      tag: '重复',
+      severity: 'watch',
+    })
+  }
+
+  const longSentence = text.split(/[。！？!?]/).find((sentence) => sentence.trim().length >= 70)
+  if (longSentence) {
+    suggestions.push({
+      id: 'local-rhythm',
+      title: '句势略长',
+      detail: '这一段里有长句拖住节奏，可以拆成两拍：先动作，再感受或判断。',
+      tag: '节奏',
+      severity: 'gentle',
+    })
+  }
+
+  const abstractWordCount = ['感觉', '情绪', '命运', '孤独', '温柔', '痛苦', '悲伤', '美好', '复杂']
+    .reduce((sum, word) => sum + (text.match(new RegExp(word, 'g'))?.length ?? 0), 0)
+  if (abstractWordCount >= 2) {
+    suggestions.push({
+      id: 'local-abstract',
+      title: '抽象词略密',
+      detail: '这段更像在概括情绪。可以补一个可见动作、环境细节或身体反应，把情绪落地。',
+      tag: '落地',
+      severity: 'watch',
+    })
+  }
+
+  if (suggestions.length === 0) {
+    suggestions.push({
+      id: 'local-keep',
+      title: '先看转折点',
+      detail: '这一段表面上比较平稳，可以检查是否缺一个更明确的转折、阻力或意外信息。',
+      tag: '结构',
+      severity: 'gentle',
+    })
+  }
+
+  return suggestions.slice(0, 4)
+}
+
+async function requestWritingAssist(
+  kind: WritingAssistKind,
+  title: string,
+  systemPrompt: string,
+  userPrompt: string,
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
+  options?: { signal?: AbortSignal; timeoutMs?: number; referenceLabel?: string; fallbackItems?: WritingSuggestion[] },
+): Promise<WritingAssistResult> {
+  const fallbackItems = options?.fallbackItems ?? []
+  if (!settings.apiKey) {
+    return {
+      kind,
+      title,
+      items: fallbackItems,
+      referenceLabel: options?.referenceLabel,
+      createdAt: new Date().toISOString(),
+    }
+  }
+
+  let res: Response
+  try {
+    res = await fetch(apiUrl(settings.baseUrl, '/chat/completions'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${settings.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: settings.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.45,
+        max_tokens: 900,
+      }),
+      signal: withTimeout(options?.signal, options?.timeoutMs ?? 18_000),
+    })
+  } catch (err) {
+    if (fallbackItems.length > 0) {
+      return {
+        kind,
+        title,
+        items: fallbackItems,
+        referenceLabel: options?.referenceLabel,
+        createdAt: new Date().toISOString(),
+      }
+    }
+    throw err
+  }
+
+  if (!res.ok) {
+    if (fallbackItems.length > 0) {
+      return {
+        kind,
+        title,
+        items: fallbackItems,
+        referenceLabel: options?.referenceLabel,
+        createdAt: new Date().toISOString(),
+      }
+    }
+    if (res.status === 401 || res.status === 403) throw new Error('API_KEY_INVALID')
+    if (res.status === 429) throw new Error('RATE_LIMITED')
+    throw new Error(`API_ERROR_${res.status}`)
+  }
+
+  const data = (await res.json()) as ChatCompletionResponse
+  const raw = (data.choices?.[0]?.message?.content ?? '').trim()
+
+  let parsed: { summary?: string; items?: unknown } | null = null
+  try {
+    parsed = JSON.parse(extractJsonBlock(raw)) as { summary?: string; items?: unknown }
+  } catch {
+    const lineItems = raw
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 4)
+    return {
+      kind,
+      title,
+      items: normalizeWritingSuggestions(lineItems),
+      referenceLabel: options?.referenceLabel,
+      createdAt: new Date().toISOString(),
+    }
+  }
+
+  const items = normalizeWritingSuggestions(parsed?.items)
+  return {
+    kind,
+    title,
+    summary: typeof parsed?.summary === 'string' ? parsed.summary.trim() : undefined,
+    items: items.length > 0 ? items : fallbackItems,
+    referenceLabel: options?.referenceLabel,
+    createdAt: new Date().toISOString(),
+  }
+}
+
+export async function generateRevisionRadar(
+  context: string,
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
+  options?: { signal?: AbortSignal; timeoutMs?: number },
+): Promise<WritingAssistResult> {
+  const trimmed = context.trim().slice(0, 1800)
+  const fallbackItems = localRevisionRadar(trimmed)
+  return requestWritingAssist(
+    'revision_radar',
+    '修改雷达',
+    `你是文学写作的修订诊断器。你的任务不是代写，而是找出最值得改的 2-4 个问题点。
+输出 ONLY JSON:
+{"summary":"一句总判断","items":[{"title":"问题名","detail":"指出问题并给一个修改方向","tag":"2-4字标签","severity":"gentle|watch|strong"}]}
+规则：
+- 只说问题定位和修改方向，不给成稿
+- 优先关注重复、抽象空泛、顺序混乱、节奏拖慢、人物标签化
+- 每条 detail 控制在 40 字以内`,
+    `当前文本：
+${trimmed}
+
+请给我短、准、低侵入的修订提醒。`,
+    settings,
+    { ...options, fallbackItems },
+  )
+}
+
+export async function generatePlotProgression(
+  context: string,
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
+  options?: {
+    signal?: AbortSignal
+    timeoutMs?: number
+    referenceText?: string
+    referenceLabel?: string
+    sceneTitle?: string
+    sceneSummary?: string
+    sceneGoal?: string
+    sceneTension?: string
+  },
+): Promise<WritingAssistResult> {
+  const trimmed = context.trim().slice(0, 1800)
+  const referenceText = options?.referenceText?.trim().slice(0, 900) ?? ''
+  const sceneContext = [
+    options?.sceneTitle ? `场景标题：${options.sceneTitle.trim()}` : '',
+    options?.sceneSummary ? `场景摘要：${options.sceneSummary.trim().slice(0, 220)}` : '',
+    options?.sceneGoal ? `场景目标：${options.sceneGoal.trim().slice(0, 120)}` : '',
+    options?.sceneTension ? `当前张力：${options.sceneTension.trim().slice(0, 120)}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+  return requestWritingAssist(
+    'plot',
+    '结构诊断',
+    `你是结构诊断器。你只指出当前场景的结构问题与推进缺口，不写正文，不代写。
+输出 ONLY JSON:
+{"summary":"一句判断","items":[{"title":"结构提醒","detail":"指出节奏、转折、冲突或信息顺序的问题","tag":"2-4字标签","severity":"gentle|watch|strong"}]}
+规则：
+- 给 2-4 条短反馈
+- 优先看节奏、转折、冲突、信息顺序、揭示时机
+- 不直接续写，只指出结构上哪里还不稳、可以往哪补
+- detail 控制在 36 字以内`,
+    [
+      sceneContext ? `当前场景卡：\n${sceneContext}` : '',
+      `当前场景：\n${trimmed}`,
+      referenceText ? `可参考的互文材料：\n${referenceText}` : '',
+      '请给出能直接进入修订或场景卡的短反馈，不要重复当前段落。',
+    ].filter(Boolean).join('\n\n'),
+    settings,
+    { ...options, referenceLabel: options?.referenceLabel },
+  )
+}
+
+export async function generateCharacterConsistency(
+  context: string,
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
+  options?: {
+    signal?: AbortSignal
+    timeoutMs?: number
+    referenceText?: string
+    referenceLabel?: string
+    sceneTitle?: string
+    sceneSummary?: string
+    sceneGoal?: string
+    sceneTension?: string
+  },
+): Promise<WritingAssistResult> {
+  const trimmed = context.trim().slice(0, 1800)
+  const referenceText = options?.referenceText?.trim().slice(0, 1200) ?? ''
+  const sceneContext = [
+    options?.sceneTitle ? `场景标题：${options.sceneTitle.trim()}` : '',
+    options?.sceneSummary ? `场景摘要：${options.sceneSummary.trim().slice(0, 220)}` : '',
+    options?.sceneGoal ? `场景目标：${options.sceneGoal.trim().slice(0, 120)}` : '',
+    options?.sceneTension ? `场景张力：${options.sceneTension.trim().slice(0, 120)}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+  return requestWritingAssist(
+    'character',
+    '人物一致性提醒',
+    `你是人物一致性提醒器。你只指出可能漂移的地方，不做续写。
+输出 ONLY JSON:
+{"summary":"一句判断","items":[{"title":"提醒点","detail":"指出哪里可能失真或缺动机","tag":"2-4字标签","severity":"gentle|watch|strong"}]}
+规则：
+- 如果信息不足，也可以提醒“动机还不够显”
+- 优先看语气、行为、目标、关系反应是否突然跳变
+- 每条 detail 控制在 36 字以内`,
+    [
+      sceneContext ? `当前场景卡：\n${sceneContext}` : '',
+      `当前文本：\n${trimmed}`,
+      referenceText ? `人物或互文参考：\n${referenceText}` : '',
+      '请围绕当前场景给我 1-3 条短提醒，不要给成稿。',
+    ].filter(Boolean).join('\n\n'),
+    settings,
+    { ...options, referenceLabel: options?.referenceLabel },
+  )
+}
+
+export async function generateImitationDrill(
+  context: string,
+  referenceText: string,
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
+  options?: { signal?: AbortSignal; timeoutMs?: number; referenceLabel?: string },
+): Promise<WritingAssistResult> {
+  const trimmed = context.trim().slice(0, 1400)
+  const reference = referenceText.trim().slice(0, 1200)
+  return requestWritingAssist(
+    'imitation',
+    '仿写陪练',
+    `你是仿写陪练教练。你的任务是拆解写法，不提供答案正文。
+输出 ONLY JSON:
+{"summary":"一句判断","items":[{"title":"观察点","detail":"说明可以练什么、怎么练","tag":"2-4字标签","severity":"gentle|watch|strong"}]}
+规则：
+- 只输出观察点、拆解点和练习方向
+- 不要直接写示范段落
+- 优先观察节奏、视角、句法、意象组织、信息推进
+- 每条 detail 控制在 40 字以内`,
+    `当前文本：
+${trimmed}
+
+参考片段：
+${reference}
+
+请做成 2-4 条可练习的观察点。`,
+    settings,
+    { ...options, referenceLabel: options?.referenceLabel },
+  )
+}
+
+export async function generateSceneMemoryMap(
+  context: string,
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
+  options?: {
+    signal?: AbortSignal
+    timeoutMs?: number
+    sceneTitle?: string
+    sceneSummary?: string
+    sceneGoal?: string
+    sceneTension?: string
+    referenceText?: string
+    referenceLabel?: string
+  },
+): Promise<WritingAssistResult> {
+  const trimmed = context.trim().slice(0, 1800)
+  const referenceText = options?.referenceText?.trim().slice(0, 1000) ?? ''
+  const sceneContext = [
+    options?.sceneTitle ? `场景标题：${options.sceneTitle.trim()}` : '',
+    options?.sceneSummary ? `场景摘要：${options.sceneSummary.trim().slice(0, 220)}` : '',
+    options?.sceneGoal ? `场景目标：${options.sceneGoal.trim().slice(0, 120)}` : '',
+    options?.sceneTension ? `场景张力：${options.sceneTension.trim().slice(0, 120)}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  return requestWritingAssist(
+    'memory_map',
+    '作者记忆提炼',
+    `你是作者记忆提炼器。你的任务是从当前场景里提炼可长期保留的记忆节点，不写正文。
+输出 ONLY JSON:
+{"summary":"一句总判断","items":[{"title":"记忆节点名","detail":"说明它为什么值得记住","tag":"人物|关系|母题|意象|时间线","severity":"gentle|watch|strong"}]}
+规则：
+- 给 3-6 条记忆节点
+- 节点必须是可以长期回看的内容，不是临时润色建议
+- 优先提炼人物、人物关系、母题、意象、时间线线索
+- detail 控制在 32 字以内
+- tag 只能是：人物、关系、母题、意象、时间线`,
+    [
+      sceneContext ? `当前场景卡：\n${sceneContext}` : '',
+      `当前场景正文：\n${trimmed}`,
+      referenceText ? `互文或参考：\n${referenceText}` : '',
+      '请提炼出适合进入作者记忆图谱的节点。',
+    ].filter(Boolean).join('\n\n'),
+    settings,
+    { ...options, referenceLabel: options?.referenceLabel },
+  )
 }
