@@ -1,4 +1,5 @@
 'use client'
+
 import type { CSSProperties } from 'react'
 import { useCallback, useEffect, useRef } from 'react'
 import { toast } from 'sonner'
@@ -25,10 +26,10 @@ interface SemanticCloudProps {
 }
 
 function getEmptyMessage(hasApiKey: boolean, hasKnowledge: boolean): string {
-  if (!hasApiKey && !hasKnowledge) return '点击右上角配置 AI，或导入知识库'
-  if (hasApiKey && !hasKnowledge) return '开始写作，回声会在文字停顿时自然出现。'
-  if (!hasApiKey && hasKnowledge) return '开始写作，知识库会在顶部回响。'
-  return '开始写作，灵感会在这里慢慢汇流。'
+  if (!hasApiKey && !hasKnowledge) return '先配置 AI 或导入共鸣库，织带才会逐渐活起来。'
+  if (hasApiKey && !hasKnowledge) return '开始写作后，AI 回声会在停笔时自然出现。'
+  if (!hasApiKey && hasKnowledge) return '开始写作后，共鸣库会先把相关片段推到这里。'
+  return '继续写，停笔后最贴近当前段落的线索会在这里浮上来。'
 }
 
 function getSourceLabel(source?: string): string {
@@ -57,7 +58,7 @@ function makeRibbonExcerpt(item: EchoItem): string {
   if (!raw) return ''
 
   let normalized = raw
-    .replace(/^[，。、"'“”‘’\]】）\s]+/u, '')
+    .replace(/^[，。、“”"'‘’（）()\s]+/u, '')
     .replace(/^(的是|而是|或者|并且|而且|因此|所以|如果|因为)/u, '')
     .trim()
 
@@ -70,9 +71,9 @@ function makeRibbonExcerpt(item: EchoItem): string {
       chunk.lastIndexOf('。'),
       chunk.lastIndexOf('，'),
       chunk.lastIndexOf('；'),
-      chunk.lastIndexOf('：'),
       chunk.lastIndexOf('？'),
       chunk.lastIndexOf('！'),
+      chunk.lastIndexOf('：'),
     )
     if (lastBoundary >= 18) return `${chunk.slice(0, lastBoundary + 1).trim()}…`
     return `${chunk.trim()}…`
@@ -101,7 +102,6 @@ function EchoFragment({
   onEchoCopied,
   selectedEchoId,
   onRibbonSelect,
-  freezeLayout: _freezeLayout = false,
 }: {
   item: EchoItem
   index: number
@@ -110,7 +110,6 @@ function EchoFragment({
   onEchoCopied?: (item: EchoItem) => void
   selectedEchoId?: string | null
   onRibbonSelect?: (item: EchoItem | null) => void
-  freezeLayout?: boolean
 }) {
   const fullText = item.detailText ?? item.originalText ?? item.content ?? ''
   const displayText = makeRibbonExcerpt(item)
@@ -151,16 +150,16 @@ function EchoFragment({
     <div className="min-w-0">
       <div
         role="button"
-        tabIndex={-1}
+        tabIndex={0}
         data-ribbon-cell
         aria-label={`织带 ${index + 1}`}
         onClick={handleClick}
         onFocus={handleFocus}
         onKeyDown={handleKeyDown}
-        className={`h-[118px] overflow-hidden rounded-md px-3 py-2.5 text-left transition-colors duration-150 ${
+        className={`h-[118px] overflow-hidden rounded-xl border px-3 py-2.5 text-left transition-colors duration-150 ${
           isSelected
-            ? 'bg-[var(--color-paper-warm)]/10'
-            : 'bg-transparent hover:bg-[var(--color-surface)]/6'
+            ? 'border-[var(--color-accent)]/45 bg-[var(--color-paper-warm)]/55 shadow-[0_10px_30px_rgba(15,23,42,0.08)]'
+            : 'border-transparent bg-transparent hover:border-[var(--color-border)] hover:bg-[var(--color-surface)]/6'
         }`}
       >
         <p
@@ -185,7 +184,6 @@ function EchoFragment({
 export function AmbientRibbon({
   echoes,
   slots,
-  freezeLayout = false,
   suppressEmptyHint = false,
   slotCount = 5,
   hasApiKey = false,
@@ -200,6 +198,7 @@ export function AmbientRibbon({
     ? Array.from({ length: slotCount }, (_, index) => slots[index] ?? null)
     : Array.from({ length: slotCount }, (_, index) => visibleEchoes[index] ?? null)
   const hasContent = slotItems.some((item) => item !== null)
+  const visibleCount = slotItems.filter((item) => item !== null).length
   const selectedEchoIdRef = useRef<string | null>(null)
   const echoesRef = useRef(echoes)
   const previousSlotSignatureRef = useRef('')
@@ -233,7 +232,7 @@ export function AmbientRibbon({
       e.stopPropagation()
       const visible = currentEchoes.slice(0, slotCount)
       const currentId = selectedEchoIdRef.current
-      const currentIdx = currentId ? visible.findIndex((item) => item.id === currentId) : -1
+      const currentIdx = currentId ? visible.findIndex((echo) => echo.id === currentId) : -1
 
       if (currentIdx < 0) {
         if (visible[0]) onRibbonSelect?.(visible[0])
@@ -252,18 +251,28 @@ export function AmbientRibbon({
 
   return (
     <div className="relative z-30 flex h-full min-h-0 flex-col px-4 py-4">
+      <div className="mx-auto mb-2 flex w-full max-w-6xl items-center justify-between gap-3 px-1">
+        <div className="flex items-center gap-2 text-[11px] text-[var(--color-ink-faint)]">
+          <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1">
+            织带 {visibleCount}/{slotCount}
+          </span>
+          <span>单击查看详情</span>
+        </div>
+        <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-[11px] text-[var(--color-ink-faint)]">
+          Alt+Q 切换
+        </span>
+      </div>
       <div className="relative mx-auto flex h-full w-full max-w-6xl items-center overflow-hidden">
         {!hasContent && !suppressEmptyHint ? (
-          <p className="text-center text-sm italic tracking-wide text-[var(--color-ink-faint)]/35">
+          <div className="mx-auto rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface)]/40 px-5 py-4 text-center text-sm italic tracking-wide text-[var(--color-ink-faint)]/55">
             {getEmptyMessage(hasApiKey, hasKnowledge)}
-          </p>
+          </div>
         ) : (
           <div className="flex w-full items-center justify-start gap-[6px] overflow-hidden">
             {slotItems.map((echo, index) => (
               <div key={`slot-${index}`} style={getSlotStyle(slotCount)} className="min-w-0 flex-1">
                 {echo ? (
                   <EchoFragment
-                    key={echo.id}
                     item={echo}
                     index={index}
                     slotCount={slotCount}
@@ -271,7 +280,6 @@ export function AmbientRibbon({
                     onEchoCopied={onEchoCopied}
                     selectedEchoId={selectedEchoId}
                     onRibbonSelect={onRibbonSelect}
-                    freezeLayout={freezeLayout}
                   />
                 ) : (
                   <div className="h-[118px]" />

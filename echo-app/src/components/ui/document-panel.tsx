@@ -1,12 +1,10 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { useCallback, useEffect, useState } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
 import { toast } from 'sonner'
 
 import { documentStorage } from '@/lib/document-storage'
-import { generateId } from '@/lib/utils/crypto'
-import type { Document } from '@/types'
 
 interface DocumentMeta {
   id: string
@@ -61,10 +59,12 @@ export function DocumentPanel({
     refreshList()
   }, [refreshList, currentDocumentId, isOpen])
 
+  const currentDoc = docs.find((doc) => doc.id === currentDocumentId) ?? docs[0] ?? null
+
   const handleNew = () => {
     onNewDocument()
     setIsOpen(false)
-    toast.success('已新建文档')
+    toast.success('已新建文稿')
   }
 
   const handleOpen = (id: string) => {
@@ -74,15 +74,15 @@ export function DocumentPanel({
     }
     onOpenDocument(id)
     setIsOpen(false)
-    toast.success('已切换文档')
+    toast.success('已切换文稿')
   }
 
   const handleDelete = (id: string, title: string) => {
     if (docs.length <= 1) {
-      toast.error('至少需要保留一个文档')
+      toast.error('至少保留一篇文稿')
       return
     }
-    if (!confirm(`确定要删除「${title}」吗？`)) return
+    if (!confirm(`确定删除「${title || '未命名文稿'}」吗？`)) return
 
     if (documentStorage.delete(id)) {
       refreshList()
@@ -94,7 +94,7 @@ export function DocumentPanel({
           onNewDocument()
         }
       }
-      toast.success('已删除')
+      toast.success('已删除文稿')
     }
   }
 
@@ -102,11 +102,23 @@ export function DocumentPanel({
     return (
       <div className="fixed top-6 left-8 z-[60]">
         <button
+          type="button"
           onClick={() => setIsOpen(true)}
-          className="w-10 h-10 rounded-full bg-[var(--color-surface)]/80 backdrop-blur border border-[var(--color-border)] shadow-sm flex items-center justify-center text-[var(--color-ink-light)] hover:text-[var(--color-ink)] transition-colors"
-          title="文档管理"
+          className="group flex min-w-[212px] items-center justify-between gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)]/92 px-4 py-3 text-left shadow-sm backdrop-blur transition-all hover:border-[var(--color-ink-faint)] hover:bg-[var(--color-paper)]"
+          title="文稿管理"
         >
-          <span className="text-lg">📄</span>
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-ink-faint)]">文稿</div>
+            <div className="mt-1 truncate text-sm font-medium text-[var(--color-ink)]">
+              {currentDoc?.title || '未命名文稿'}
+            </div>
+            <div className="mt-1 text-[11px] text-[var(--color-ink-faint)]">
+              {currentDoc ? `最近编辑 ${formatDate(currentDoc.updatedAt)}` : '打开文稿列表'}
+            </div>
+          </div>
+          <span className="shrink-0 rounded-full border border-[var(--color-border)] bg-[var(--color-paper)] px-2.5 py-1 text-[11px] text-[var(--color-ink-light)] transition-colors group-hover:text-[var(--color-ink)]">
+            {docs.length}
+          </span>
         </button>
       </div>
     )
@@ -118,33 +130,38 @@ export function DocumentPanel({
         initial={{ opacity: 0, x: -20 }}
         animate={{ opacity: 1, x: 0 }}
         exit={{ opacity: 0, x: -20 }}
-        className="fixed top-6 left-8 w-72 bg-[var(--color-surface)]/90 backdrop-blur-xl border border-[var(--color-border)] rounded-xl shadow-lg z-[60] overflow-hidden max-h-[calc(100vh-3rem)] flex flex-col"
+        className="fixed top-6 left-8 z-[60] flex max-h-[calc(100vh-3rem)] w-72 flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]/90 shadow-lg backdrop-blur-xl"
       >
-        <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center justify-between">
-          <h3 className="text-sm font-medium text-[var(--color-ink)]">
-            文档
-          </h3>
+        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
+          <div>
+            <h3 className="text-sm font-medium text-[var(--color-ink)]">文稿</h3>
+            <p className="mt-0.5 text-[11px] text-[var(--color-ink-faint)]">
+              共 {docs.length} 篇，本地自动保存
+            </p>
+          </div>
           <button
+            type="button"
             onClick={() => setIsOpen(false)}
-            className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] transition-colors"
+            className="text-[var(--color-ink-faint)] transition-colors hover:text-[var(--color-ink)]"
           >
-            ✕
+            ×
           </button>
         </div>
 
-        <div className="p-3 border-b border-[var(--color-border)]">
+        <div className="border-b border-[var(--color-border)] p-3">
           <button
+            type="button"
             onClick={handleNew}
-            className="w-full py-2.5 px-3 bg-[var(--color-btn-primary-bg)] text-[var(--color-btn-primary-text)] text-sm rounded-lg hover:opacity-90 transition-opacity"
+            className="w-full rounded-lg bg-[var(--color-btn-primary-bg)] px-3 py-2.5 text-sm text-[var(--color-btn-primary-text)] transition-opacity hover:opacity-90"
           >
-            + 新建文档
+            + 新建文稿
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto min-h-0">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           {docs.length === 0 ? (
             <div className="px-4 py-8 text-center text-sm text-[var(--color-ink-faint)]">
-              暂无文档
+              暂无文稿
             </div>
           ) : (
             <ul className="py-2">
@@ -153,36 +170,36 @@ export function DocumentPanel({
                 return (
                   <li
                     key={doc.id}
-                    className={`group px-4 py-2.5 flex items-center justify-between gap-2 ${
-                      isCurrent
-                        ? 'bg-[var(--color-ink)]/10'
-                        : 'hover:bg-[var(--color-ink)]/10'
+                    className={`group flex items-center justify-between gap-2 px-4 py-2.5 ${
+                      isCurrent ? 'bg-[var(--color-ink)]/10' : 'hover:bg-[var(--color-ink)]/10'
                     }`}
                   >
                     <button
+                      type="button"
                       onClick={() => handleOpen(doc.id)}
-                      className="flex-1 min-w-0 text-left"
+                      className="min-w-0 flex-1 text-left"
                     >
-                      <div className="text-sm text-[var(--color-ink)] truncate font-medium">
-                        {doc.title || '无题'}
+                      <div className="truncate text-sm font-medium text-[var(--color-ink)]">
+                        {doc.title || '未命名'}
                       </div>
-                      <div className="text-[10px] text-[var(--color-ink-faint)] mt-0.5">
+                      <div className="mt-0.5 text-[10px] text-[var(--color-ink-faint)]">
                         {formatDate(doc.updatedAt)}
                       </div>
                     </button>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                       {isCurrent && (
-                        <span className="text-[10px] text-[var(--color-ink)] px-1.5 py-0.5 rounded bg-[var(--color-ink)]/10">
+                        <span className="rounded bg-[var(--color-ink)]/10 px-1.5 py-0.5 text-[10px] text-[var(--color-ink)]">
                           当前
                         </span>
                       )}
                       <button
+                        type="button"
                         onClick={() => handleDelete(doc.id, doc.title)}
                         disabled={docs.length <= 1}
-                        className="p-1 text-[var(--color-ink-faint)] hover:text-red-500 disabled:opacity-30 disabled:cursor-not-allowed"
+                        className="p-1 text-[var(--color-ink-faint)] disabled:cursor-not-allowed disabled:opacity-30 hover:text-red-500"
                         title="删除"
                       >
-                        🗑
+                        ×
                       </button>
                     </div>
                   </li>
@@ -190,10 +207,6 @@ export function DocumentPanel({
               })}
             </ul>
           )}
-        </div>
-
-        <div className="px-4 py-2 border-t border-[var(--color-border)] text-[10px] text-[var(--color-ink-faint)]">
-          共 {docs.length} 篇 · 自动保存到本地
         </div>
       </motion.div>
     </AnimatePresence>

@@ -37,6 +37,30 @@ function getShapeLabel(shape?: CustomPrompt['outputShape']) {
   return (shape ?? 'short_lines') === 'paragraph' ? '段落' : '短句'
 }
 
+function FilterPill({
+  active,
+  label,
+  onClick,
+}: {
+  active: boolean
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
+        active
+          ? 'bg-[var(--color-ink)] text-[var(--color-paper)]'
+          : 'bg-[var(--color-paper)] text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]'
+      }`}
+    >
+      {label}
+    </button>
+  )
+}
+
 export function CustomPromptManager({
   isOpen,
   onClose,
@@ -130,7 +154,9 @@ export function CustomPromptManager({
     setFormContent(prompt.content)
     setFormMode(prompt.mode ?? 'ambient')
     setFormBehavior(prompt.behavior ?? 'freeform')
-    setFormOutputShape(prompt.outputShape ?? ((prompt.mode ?? 'ambient') === 'detail' ? 'paragraph' : 'short_lines'))
+    setFormOutputShape(
+      prompt.outputShape ?? ((prompt.mode ?? 'ambient') === 'detail' ? 'paragraph' : 'short_lines'),
+    )
     setFormUseRag(prompt.useRag ?? false)
     setFormRagFallback(prompt.ragFallback ?? false)
     setShowForm(true)
@@ -185,7 +211,6 @@ export function CustomPromptManager({
   const handleDelete = (id: string) => {
     const prompt = prompts.find((entry) => entry.id === id)
     if (!prompt) return
-
     if (!confirm(`确定删除「${prompt.name}」吗？`)) return
 
     try {
@@ -255,29 +280,30 @@ export function CustomPromptManager({
           initial={{ opacity: 0, scale: 0.97, y: 12 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.97, y: 12 }}
-          className="flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl"
+          className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-[28px] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-2xl"
           onClick={(event) => event.stopPropagation()}
         >
           <div className="border-b border-[var(--color-border)] px-6 py-5">
             <div className="flex flex-wrap items-start justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-medium text-[var(--color-ink)]">自定义模块</h2>
-                <p className="mt-1 text-sm text-[var(--color-ink-faint)]">
-                  ambient 模块参与织带，detail 模块只用于详情解释。创建、编辑和导入都统一放在这里。
+              <div className="min-w-0">
+                <p className="text-[11px] uppercase tracking-[0.22em] text-[var(--color-ink-faint)]">Module Studio</p>
+                <h2 className="mt-2 text-2xl font-medium text-[var(--color-ink)]">自定义模块</h2>
+                <p className="mt-2 max-w-2xl text-sm leading-7 text-[var(--color-ink-light)]">
+                  `ambient` 模块参与织带，`detail` 模块只在详情解释里调用。创建、编辑、导入和整理都统一放在这里。
                 </p>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => startCreate(modeFilter === 'detail' ? 'detail' : 'ambient')}
-                  className="rounded-lg bg-[var(--color-btn-primary-bg)] px-4 py-2 text-sm text-[var(--color-btn-primary-text)] hover:opacity-90"
+                  className="rounded-xl bg-[var(--color-btn-primary-bg)] px-4 py-2 text-sm text-[var(--color-btn-primary-text)] hover:opacity-90"
                 >
                   新建模块
                 </button>
                 <button
                   type="button"
                   onClick={onClose}
-                  className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm text-[var(--color-ink-faint)] hover:bg-[var(--color-ink)]/5 hover:text-[var(--color-ink)]"
+                  className="rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm text-[var(--color-ink-faint)] hover:bg-[var(--color-ink)]/5 hover:text-[var(--color-ink)]"
                 >
                   关闭
                 </button>
@@ -288,300 +314,316 @@ export function CustomPromptManager({
                 全部 {prompts.length}
               </span>
               <span className="rounded-full bg-[var(--color-paper)] px-2.5 py-1 text-[var(--color-ink-faint)]">
-                ambient {ambientCount}
+                织带 {ambientCount}
               </span>
               <span className="rounded-full bg-[var(--color-paper)] px-2.5 py-1 text-[var(--color-ink-faint)]">
-                detail {detailCount}
+                详情 {detailCount}
               </span>
             </div>
           </div>
 
-          <div className="flex flex-1 min-h-0 flex-col gap-4 overflow-hidden px-6 py-5">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-2">
-                {[
-                  { value: 'ambient' as const, label: '织带模块' },
-                  { value: 'detail' as const, label: '详情模块' },
-                  { value: 'all' as const, label: '全部' },
-                ].map((option) => (
+          <div className="grid min-h-0 flex-1 gap-0 lg:grid-cols-[1.15fr_0.85fr]">
+            <div className="min-h-0 border-b border-[var(--color-border)] px-6 py-5 lg:border-b-0 lg:border-r">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <FilterPill active={modeFilter === 'ambient'} label="织带模块" onClick={() => setModeFilter('ambient')} />
+                  <FilterPill active={modeFilter === 'detail'} label="详情模块" onClick={() => setModeFilter('detail')} />
+                  <FilterPill active={modeFilter === 'all'} label="全部" onClick={() => setModeFilter('all')} />
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
                   <button
-                    key={option.value}
                     type="button"
-                    onClick={() => setModeFilter(option.value)}
-                    className={`rounded-full px-3 py-1.5 text-xs transition-colors ${
-                      modeFilter === option.value
-                        ? 'bg-[var(--color-ink)] text-[var(--color-paper)]'
-                        : 'bg-[var(--color-paper)] text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]'
-                    }`}
+                    onClick={handleExport}
+                    className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
                   >
-                    {option.label}
+                    导出
                   </button>
-                ))}
+                  <button
+                    type="button"
+                    onClick={handleImport}
+                    className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
+                  >
+                    导入
+                  </button>
+                </div>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleExport}
-                  className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
-                >
-                  导出
-                </button>
-                <button
-                  type="button"
-                  onClick={handleImport}
-                  className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
-                >
-                  导入
-                </button>
+
+              {!isSelecting && (
+                <div className="mt-4 rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-3 text-sm text-[var(--color-ink-faint)]">
+                  这里负责模块本身的定义和维护；真正让某个 `ambient` 模块参与织带，仍然要回到设置页里的“内容模块”里启用它。
+                </div>
+              )}
+
+              <div className="mt-4 min-h-0 overflow-y-auto pr-1 lg:max-h-[58vh]">
+                {visiblePrompts.length === 0 ? (
+                  <div className="flex min-h-[220px] items-center justify-center rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-paper)] px-6 text-center text-sm text-[var(--color-ink-faint)]">
+                    当前筛选下还没有模块。先新建一个，再决定是否把它接入织带或详情解释。
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {visiblePrompts.map((prompt) => {
+                      const selected = selectedId === prompt.id
+                      const isAmbient = (prompt.mode ?? 'ambient') === 'ambient'
+                      return (
+                        <div
+                          key={prompt.id}
+                          className={`rounded-2xl border px-4 py-4 transition-colors ${
+                            selected
+                              ? 'border-[var(--color-ink)] bg-[var(--color-ink)]/5'
+                              : 'border-[var(--color-border)] bg-[var(--color-paper)] hover:border-[var(--color-ink-light)]'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-4">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <h3 className="text-sm font-medium text-[var(--color-ink)]">{prompt.name}</h3>
+                                <span className="rounded-full bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">
+                                  {getModeLabel(prompt.mode)}
+                                </span>
+                                <span className="rounded-full bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">
+                                  {getBehaviorLabel(prompt.behavior)}
+                                </span>
+                                <span className="rounded-full bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">
+                                  {getShapeLabel(prompt.outputShape)}
+                                </span>
+                                {selected && (
+                                  <span className="rounded-full bg-[var(--color-btn-primary-bg)] px-2 py-0.5 text-[10px] text-[var(--color-btn-primary-text)]">
+                                    已选择
+                                  </span>
+                                )}
+                              </div>
+                              {prompt.description && (
+                                <p className="mt-1.5 text-sm text-[var(--color-ink-light)]">{prompt.description}</p>
+                              )}
+                              <p className="mt-2 text-xs text-[var(--color-ink-faint)]">
+                                {isAmbient ? '会出现在织带候选中' : '只在详情解释里调用'}
+                                {' · '}
+                                共鸣库 {prompt.useRag ? '开启' : '关闭'}
+                                {' · '}
+                                回退 {prompt.ragFallback ? '允许' : '关闭'}
+                              </p>
+                              <p className="mt-2 line-clamp-3 text-xs leading-6 text-[var(--color-ink-faint)]">
+                                {prompt.content}
+                              </p>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              {isSelecting && (
+                                <button
+                                  type="button"
+                                  onClick={() => onSelect?.(prompt.id)}
+                                  className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
+                                >
+                                  选择
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => startEdit(prompt)}
+                                className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
+                              >
+                                编辑
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDuplicate(prompt.id)}
+                                className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
+                              >
+                                复制
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDelete(prompt.id)}
+                                className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-500 hover:bg-red-50"
+                              >
+                                删除
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             </div>
 
-            {!isSelecting && (
-              <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-3 text-sm text-[var(--color-ink-faint)]">
-                这里只有模块管理。是否让某个 ambient 模块真的参与织带，要回到设置页里的“内容模块”勾选。
-              </div>
-            )}
-
-            {showForm && (
-              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] p-5">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h3 className="text-base font-medium text-[var(--color-ink)]">
-                      {editingId ? '编辑模块' : '新建模块'}
-                    </h3>
-                    <p className="mt-1 text-sm text-[var(--color-ink-faint)]">
-                      先决定它属于织带还是详情，再定义输出形态和提示词。
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={resetForm}
-                    className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
-                  >
-                    收起
-                  </button>
-                </div>
-
-                <div className="mt-5 grid gap-4 md:grid-cols-2">
-                  <div>
-                    <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">模块名称</label>
-                    <input
-                      type="text"
-                      value={formName}
-                      onChange={(event) => setFormName(event.target.value)}
-                      placeholder="例如：百科解释"
-                      className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">一句描述</label>
-                    <input
-                      type="text"
-                      value={formDescription}
-                      onChange={(event) => setFormDescription(event.target.value)}
-                      placeholder="告诉自己这个模块负责什么"
-                      className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
-                    />
-                  </div>
-                </div>
-
-                <div className="mt-4 grid gap-4 md:grid-cols-3">
-                  <div>
-                    <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">模块归属</label>
-                    <select
-                      value={formMode}
-                      onChange={(event) => {
-                        const nextMode = event.target.value as 'ambient' | 'detail'
-                        setFormMode(nextMode)
-                        setFormOutputShape(nextMode === 'detail' ? 'paragraph' : 'short_lines')
-                      }}
-                      className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
-                    >
-                      <option value="ambient">织带模块</option>
-                      <option value="detail">详情模块</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">行为类型</label>
-                    <select
-                      value={formBehavior}
-                      onChange={(event) => applyBehaviorPreset(event.target.value as NonNullable<CustomPrompt['behavior']>)}
-                      className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
-                    >
-                      <option value="freeform">自由生成</option>
-                      <option value="term_list">词汇提取</option>
-                      <option value="guided_terms">领域联想</option>
-                      <option value="entity_explain">实体解释</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">输出形态</label>
-                    <select
-                      value={formOutputShape}
-                      onChange={(event) => setFormOutputShape(event.target.value as 'short_lines' | 'paragraph')}
-                      className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
-                    >
-                      <option value="short_lines">短句</option>
-                      <option value="paragraph">段落</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="mt-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
-                  <div className="flex flex-wrap gap-6">
-                    <label className="flex items-center gap-2 text-sm text-[var(--color-ink)]">
-                      <input
-                        type="checkbox"
-                        checked={formUseRag}
-                        onChange={(event) => setFormUseRag(event.target.checked)}
-                        className="rounded border-[var(--color-border)]"
-                      />
-                      使用共鸣库上下文
-                    </label>
-                    <label className="flex items-center gap-2 text-sm text-[var(--color-ink)]">
-                      <input
-                        type="checkbox"
-                        checked={formRagFallback}
-                        onChange={(event) => setFormRagFallback(event.target.checked)}
-                        className="rounded border-[var(--color-border)]"
-                      />
-                      RAG 不可用时允许回退
-                    </label>
-                  </div>
-                  <p className="mt-2 text-xs text-[var(--color-ink-faint)]">
-                    只有确实依赖知识库时再打开；否则优先保持简单，避免把等待时间全堆到模块上。
-                  </p>
-                </div>
-
-                <div className="mt-4">
-                  <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">系统提示词</label>
-                  <textarea
-                    value={formContent}
-                    onChange={(event) => setFormContent(event.target.value)}
-                    placeholder="定义这个模块的角色、输入上下文和输出要求"
-                    className="min-h-[220px] w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm resize-y"
-                  />
-                </div>
-
-                <div className="mt-5 flex flex-wrap justify-end gap-2">
-                  {editingId && (
+            <div className="min-h-0 overflow-y-auto px-6 py-5">
+              {showForm ? (
+                <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-medium text-[var(--color-ink)]">
+                        {editingId ? '编辑模块' : '新建模块'}
+                      </h3>
+                      <p className="mt-1 text-sm text-[var(--color-ink-faint)]">
+                        先决定它属于织带还是详情，再定义输出形态和提示词。
+                      </p>
+                    </div>
                     <button
                       type="button"
-                      onClick={() => {
-                        resetForm()
-                        startCreate(formMode)
-                      }}
+                      onClick={resetForm}
+                      className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
+                    >
+                      收起
+                    </button>
+                  </div>
+
+                  <div className="mt-5 grid gap-4 md:grid-cols-2">
+                    <div>
+                      <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">模块名称</label>
+                      <input
+                        type="text"
+                        value={formName}
+                        onChange={(event) => setFormName(event.target.value)}
+                        placeholder="例如：医生联想"
+                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">一句描述</label>
+                      <input
+                        type="text"
+                        value={formDescription}
+                        onChange={(event) => setFormDescription(event.target.value)}
+                        placeholder="告诉自己这个模块负责什么"
+                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-4 md:grid-cols-3">
+                    <div>
+                      <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">模块归属</label>
+                      <select
+                        value={formMode}
+                        onChange={(event) => {
+                          const nextMode = event.target.value as 'ambient' | 'detail'
+                          setFormMode(nextMode)
+                          setFormOutputShape(nextMode === 'detail' ? 'paragraph' : 'short_lines')
+                        }}
+                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+                      >
+                        <option value="ambient">织带模块</option>
+                        <option value="detail">详情模块</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">行为类型</label>
+                      <select
+                        value={formBehavior}
+                        onChange={(event) =>
+                          applyBehaviorPreset(event.target.value as NonNullable<CustomPrompt['behavior']>)
+                        }
+                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+                      >
+                        <option value="freeform">自由生成</option>
+                        <option value="term_list">词汇提取</option>
+                        <option value="guided_terms">领域联想</option>
+                        <option value="entity_explain">实体解释</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">输出形态</label>
+                      <select
+                        value={formOutputShape}
+                        onChange={(event) => setFormOutputShape(event.target.value as 'short_lines' | 'paragraph')}
+                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm"
+                      >
+                        <option value="short_lines">短句</option>
+                        <option value="paragraph">段落</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
+                    <div className="flex flex-wrap gap-6">
+                      <label className="flex items-center gap-2 text-sm text-[var(--color-ink)]">
+                        <input
+                          type="checkbox"
+                          checked={formUseRag}
+                          onChange={(event) => setFormUseRag(event.target.checked)}
+                          className="rounded border-[var(--color-border)]"
+                        />
+                        使用共鸣库上下文
+                      </label>
+                      <label className="flex items-center gap-2 text-sm text-[var(--color-ink)]">
+                        <input
+                          type="checkbox"
+                          checked={formRagFallback}
+                          onChange={(event) => setFormRagFallback(event.target.checked)}
+                          className="rounded border-[var(--color-border)]"
+                        />
+                        RAG 不可用时允许回退
+                      </label>
+                    </div>
+                    <p className="mt-2 text-xs text-[var(--color-ink-faint)]">
+                      只有确实依赖知识库时再打开，避免把等待时间全堆到模块本身。
+                    </p>
+                  </div>
+
+                  <div className="mt-4">
+                    <label className="mb-1.5 block text-xs text-[var(--color-ink-light)]">系统提示词</label>
+                    <textarea
+                      value={formContent}
+                      onChange={(event) => setFormContent(event.target.value)}
+                      placeholder="定义这个模块的角色、输入上下文和输出要求"
+                      className="min-h-[240px] w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm resize-y"
+                    />
+                  </div>
+
+                  <div className="mt-5 flex flex-wrap justify-end gap-2">
+                    {editingId && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          resetForm()
+                          startCreate(formMode)
+                        }}
+                        className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm hover:bg-[var(--color-ink)]/5"
+                      >
+                        另存为新模块
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={resetForm}
                       className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm hover:bg-[var(--color-ink)]/5"
                     >
-                      另存为新模块
+                      取消
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={resetForm}
-                    className="rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm hover:bg-[var(--color-ink)]/5"
-                  >
-                    取消
-                  </button>
-                  <button
-                    type="button"
-                    onClick={editingId ? handleUpdate : handleCreate}
-                    className="rounded-lg bg-[var(--color-btn-primary-bg)] px-4 py-2 text-sm text-[var(--color-btn-primary-text)] hover:opacity-90"
-                  >
-                    {editingId ? '保存修改' : '创建模块'}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-              {visiblePrompts.length === 0 ? (
-                <div className="flex h-full min-h-[220px] items-center justify-center rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-paper)] px-6 text-center text-sm text-[var(--color-ink-faint)]">
-                  当前筛选下还没有模块。先新建一个，再回到设置页里决定是否启用它。
+                    <button
+                      type="button"
+                      onClick={editingId ? handleUpdate : handleCreate}
+                      className="rounded-lg bg-[var(--color-btn-primary-bg)] px-4 py-2 text-sm text-[var(--color-btn-primary-text)] hover:opacity-90"
+                    >
+                      {editingId ? '保存修改' : '创建模块'}
+                    </button>
+                  </div>
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {visiblePrompts.map((prompt) => {
-                    const selected = selectedId === prompt.id
-                    const isAmbient = (prompt.mode ?? 'ambient') === 'ambient'
-                    return (
-                      <div
-                        key={prompt.id}
-                        className={`rounded-2xl border px-4 py-4 transition-colors ${
-                          selected
-                            ? 'border-[var(--color-ink)] bg-[var(--color-ink)]/5'
-                            : 'border-[var(--color-border)] bg-[var(--color-paper)] hover:border-[var(--color-ink-light)]'
-                        }`}
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-4">
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <h3 className="text-sm font-medium text-[var(--color-ink)]">{prompt.name}</h3>
-                              <span className="rounded-full bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">
-                                {getModeLabel(prompt.mode)}
-                              </span>
-                              <span className="rounded-full bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">
-                                {getBehaviorLabel(prompt.behavior)}
-                              </span>
-                              <span className="rounded-full bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">
-                                {getShapeLabel(prompt.outputShape)}
-                              </span>
-                              {selected && (
-                                <span className="rounded-full bg-[var(--color-btn-primary-bg)] px-2 py-0.5 text-[10px] text-[var(--color-btn-primary-text)]">
-                                  已选择
-                                </span>
-                              )}
-                            </div>
-                            {prompt.description && (
-                              <p className="mt-1.5 text-sm text-[var(--color-ink-faint)]">{prompt.description}</p>
-                            )}
-                            <p className="mt-2 text-xs text-[var(--color-ink-faint)]">
-                              {isAmbient ? '会出现在织带候选中' : '只在详情解释里调用'}
-                              {' · '}
-                              共鸣库 {prompt.useRag ? '开启' : '关闭'}
-                              {' · '}
-                              回退 {prompt.ragFallback ? '允许' : '关闭'}
-                            </p>
-                            <p className="mt-2 line-clamp-3 text-xs leading-6 text-[var(--color-ink-faint)]">
-                              {prompt.content}
-                            </p>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            {isSelecting && (
-                              <button
-                                type="button"
-                                onClick={() => onSelect?.(prompt.id)}
-                                className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
-                              >
-                                选择
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => startEdit(prompt)}
-                              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
-                            >
-                              编辑
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDuplicate(prompt.id)}
-                              className="rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-ink)]/5"
-                            >
-                              复制
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDelete(prompt.id)}
-                              className="rounded-lg border border-red-200 px-3 py-1.5 text-xs text-red-500 hover:bg-red-50"
-                            >
-                              删除
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
+                <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] p-5">
+                  <h3 className="text-base font-medium text-[var(--color-ink)]">开始新模块</h3>
+                  <p className="mt-2 text-sm leading-7 text-[var(--color-ink-faint)]">
+                    从右上角新建，或先从左侧选一个已有模块编辑。推荐先写一句描述，再补完整提示词。
+                  </p>
+                  <div className="mt-4 grid gap-2">
+                    <button
+                      type="button"
+                      onClick={() => startCreate('ambient')}
+                      className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-left hover:border-[var(--color-ink-light)]"
+                    >
+                      <div className="text-sm font-medium text-[var(--color-ink)]">新建织带模块</div>
+                      <div className="mt-1 text-xs text-[var(--color-ink-faint)]">用于医生联想、意象提示、词汇衍生这一类短输出。</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => startCreate('detail')}
+                      className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-left hover:border-[var(--color-ink-light)]"
+                    >
+                      <div className="text-sm font-medium text-[var(--color-ink)]">新建详情模块</div>
+                      <div className="mt-1 text-xs text-[var(--color-ink-faint)]">用于名词解释、背景补充、延展说明这一类长输出。</div>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

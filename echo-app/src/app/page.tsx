@@ -28,7 +28,9 @@ import { debounce } from '@/lib/utils/time'
 import { writingWorkspaceStorage } from '@/lib/writing-workspace-storage'
 import { adoptionStore } from '@/services/adoption-store'
 import {
+  canBatchGenerateEchoesForModule,
   generateCharacterConsistency,
+  generateBatchEchoesForModules,
   generateEchoesForModule,
   generateImitationDrill,
   generatePlotProgression,
@@ -65,12 +67,16 @@ const ERROR_THROTTLE_MS = 60_000
 const DISPLAY_ECHOES_KEY = 'echo-display-echoes'
 const DISPLAY_ECHOES_DOC_ID_KEY = 'echo-display-echoes-doc-id'
 const HOME_UI_STATE_KEY = 'echo-home-ui-state'
+const RIBBON_MODULE_SOFT_TIMEOUT_FAST_MS = 6_000
 const RIBBON_MODULE_SOFT_TIMEOUT_MS = 12_000
 const RIBBON_MODULE_SOFT_TIMEOUT_RELIABLE_MS = 18_000
+const RIBBON_MODULE_HARD_TIMEOUT_FAST_MS = 18_000
 const RIBBON_MODULE_HARD_TIMEOUT_MS = 45_000
 const RIBBON_MODULE_HARD_TIMEOUT_RELIABLE_MS = 60_000
+const RIBBON_CUSTOM_MODULE_SOFT_TIMEOUT_FAST_MS = 8_000
 const RIBBON_CUSTOM_MODULE_SOFT_TIMEOUT_MS = 18_000
 const RIBBON_CUSTOM_MODULE_SOFT_TIMEOUT_RELIABLE_MS = 30_000
+const RIBBON_CUSTOM_MODULE_HARD_TIMEOUT_FAST_MS = 24_000
 const RIBBON_CUSTOM_MODULE_HARD_TIMEOUT_MS = 60_000
 const RIBBON_CUSTOM_MODULE_HARD_TIMEOUT_RELIABLE_MS = 75_000
 const RIBBON_NETWORK_RETRY_DELAY_MS = 900
@@ -204,8 +210,18 @@ function normalizeVisibleEchoes(
   })
 }
 
-function getModuleTimeouts(module: RibbonModuleConfig, reliableMode: boolean): { softTimeoutMs: number; hardTimeoutMs: number } {
+function getModuleTimeouts(
+  module: RibbonModuleConfig,
+  reliableMode: boolean,
+  lowLatencyMode: boolean,
+): { softTimeoutMs: number; hardTimeoutMs: number } {
   if (module.type === 'custom') {
+    if (lowLatencyMode) {
+      return {
+        softTimeoutMs: RIBBON_CUSTOM_MODULE_SOFT_TIMEOUT_FAST_MS,
+        hardTimeoutMs: RIBBON_CUSTOM_MODULE_HARD_TIMEOUT_FAST_MS,
+      }
+    }
     return reliableMode
       ? {
           softTimeoutMs: RIBBON_CUSTOM_MODULE_SOFT_TIMEOUT_RELIABLE_MS,
@@ -215,6 +231,13 @@ function getModuleTimeouts(module: RibbonModuleConfig, reliableMode: boolean): {
           softTimeoutMs: RIBBON_CUSTOM_MODULE_SOFT_TIMEOUT_MS,
           hardTimeoutMs: RIBBON_CUSTOM_MODULE_HARD_TIMEOUT_MS,
         }
+  }
+
+  if (lowLatencyMode) {
+    return {
+      softTimeoutMs: RIBBON_MODULE_SOFT_TIMEOUT_FAST_MS,
+      hardTimeoutMs: RIBBON_MODULE_HARD_TIMEOUT_FAST_MS,
+    }
   }
 
   return reliableMode
@@ -336,6 +359,63 @@ function readStoredHomeUiState(slotCount: number): {
       selectedRibbonEcho: null,
     }
   }
+}
+
+function FloatingResultPanel({
+  title,
+  subtitle,
+  loading = false,
+  emptyText,
+  items,
+  onClose,
+}: {
+  title: string
+  subtitle: string
+  loading?: boolean
+  emptyText: string
+  items: Array<{ id: string; content: string; onClick: () => void }>
+  onClose: () => void
+}) {
+  return (
+    <div className="fixed left-6 top-1/2 z-50 w-[340px] max-w-sm -translate-y-1/2 rounded-[24px] border border-[var(--color-border)] bg-[var(--color-surface)]/96 p-4 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-xl">
+      <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] pb-3">
+        <div className="min-w-0">
+          <p className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-ink-faint)]">编辑辅助</p>
+          <h3 className="mt-1 text-sm font-medium text-[var(--color-ink)]">{title}</h3>
+          <p className="mt-1 text-[11px] leading-5 text-[var(--color-ink-faint)]">{subtitle}</p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-full p-1 text-[var(--color-ink-faint)] transition-colors hover:bg-[var(--color-paper)] hover:text-[var(--color-ink)]"
+          aria-label="关闭"
+        >
+          ×
+        </button>
+      </div>
+      <div className="mt-3 max-h-72 overflow-y-auto">
+        {loading ? (
+          <p className="text-sm text-[var(--color-ink-faint)]">加载中…</p>
+        ) : items.length === 0 ? (
+          <p className="text-sm text-[var(--color-ink-faint)]">{emptyText}</p>
+        ) : (
+          <ul className="space-y-2">
+            {items.map((item) => (
+              <li key={item.id}>
+                <button
+                  type="button"
+                  className="w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-3 py-2.5 text-left text-sm text-[var(--color-ink)] transition-colors hover:border-[var(--color-ink-faint)] hover:bg-[var(--color-surface)]"
+                  onClick={item.onClick}
+                >
+                  {item.content}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  )
 }
 
 export default function Home() {
@@ -691,7 +771,11 @@ export default function Home() {
     backgroundJobsByModuleRef.current[module.id] = { jobId, snapshotId }
     setAiStatus('loading')
 
-    const { softTimeoutMs, hardTimeoutMs } = getModuleTimeouts(module, settings.reliableRibbonMode)
+    const { softTimeoutMs, hardTimeoutMs } = getModuleTimeouts(
+      module,
+      settings.reliableRibbonMode,
+      settings.lowLatencyMode,
+    )
 
     const clearJobHandles = () => {
       const softTimeoutId = backgroundJobSoftTimeoutsRef.current[jobId]
@@ -800,6 +884,176 @@ export default function Home() {
     }
 
     return runAttempt(0)
+  }, [hasApiKey, settings])
+
+  const runBackgroundModuleBatch = useCallback((
+    snapshotId: string,
+    documentIdForJob: string,
+    slotCount: RibbonSlotCount,
+    text: string,
+    ragResults: EchoItem[],
+    modules: RibbonModuleConfig[],
+  ) => {
+    if (!hasApiKey || modules.length < 2) return Promise.resolve()
+
+    const batchableModules = modules.filter((module) => {
+      const existingJob = backgroundJobsByModuleRef.current[module.id]
+      if (
+        existingJob &&
+        existingJob.snapshotId === snapshotId &&
+        backgroundJobControllersRef.current[existingJob.jobId]
+      ) {
+        devLog.push('ribbon', 'background ai job already running, skip duplicate', {
+          moduleId: module.id,
+          snapshotId,
+          existingJobId: existingJob.jobId,
+        })
+        return false
+      }
+      return true
+    })
+
+    if (batchableModules.length < 2) return Promise.resolve()
+
+    const controller = new AbortController()
+    const jobs = batchableModules.map((module) => {
+      const type = module.type === 'custom' ? 'custom' : module.type === 'ai:quote' ? 'tag' : 'imagery'
+      const origin: 'ai_imagery' | 'ai_tag' | 'ai_custom' =
+        module.type === 'custom'
+          ? 'ai_custom'
+          : module.type === 'ai:quote'
+            ? 'ai_tag'
+            : 'ai_imagery'
+      const jobId = generateId()
+
+      setRibbonState((prev) => {
+        const next = ribbonEngine.registerJob(prev, snapshotId, type, module.id, jobId)
+        return ribbonEngine.markJobRunning(next.state, next.jobId)
+      })
+
+      backgroundJobControllersRef.current[jobId] = controller
+      backgroundJobsByModuleRef.current[module.id] = { jobId, snapshotId }
+
+      return { module, jobId, origin }
+    })
+
+    const softTimeoutMs = Math.max(
+      ...batchableModules.map((module) => getModuleTimeouts(module, settings.reliableRibbonMode, settings.lowLatencyMode).softTimeoutMs),
+    )
+    const hardTimeoutMs = Math.max(
+      ...batchableModules.map((module) => getModuleTimeouts(module, settings.reliableRibbonMode, settings.lowLatencyMode).hardTimeoutMs),
+    )
+
+    setAiStatus('loading')
+
+    for (const { module, jobId } of jobs) {
+      backgroundJobSoftTimeoutsRef.current[jobId] = window.setTimeout(() => {
+        if (!backgroundJobControllersRef.current[jobId]) return
+        devLog.push('ribbon', 'background ai batch soft timeout', {
+          moduleId: module.id,
+          snapshotId,
+          jobId,
+          softTimeoutMs,
+        })
+        setRibbonState((prev) => ribbonEngine.markJobSoftTimedOut(prev, jobId, 'soft timeout, continuing'))
+      }, softTimeoutMs)
+    }
+
+    const clearJobHandles = () => {
+      for (const { module, jobId } of jobs) {
+        const softTimeoutId = backgroundJobSoftTimeoutsRef.current[jobId]
+        if (softTimeoutId != null) {
+          window.clearTimeout(softTimeoutId)
+          delete backgroundJobSoftTimeoutsRef.current[jobId]
+        }
+        delete backgroundJobControllersRef.current[jobId]
+        if (backgroundJobsByModuleRef.current[module.id]?.jobId === jobId) {
+          delete backgroundJobsByModuleRef.current[module.id]
+        }
+      }
+    }
+
+    devLog.push('ribbon', 'background ai batch started', {
+      snapshotId,
+      modules: batchableModules.map((module) => module.id),
+      hardTimeoutMs,
+    })
+
+    return generateBatchEchoesForModules(
+      text,
+      ragResults,
+      {
+        apiKey: settings.apiKey,
+        baseUrl: settings.baseUrl,
+        model: settings.model,
+        ribbonFilterModel: settings.ribbonFilterModel ?? '',
+      },
+      batchableModules.map((module) => ({
+        type: module.type,
+        id: module.id,
+        prompt: module.prompt,
+        model: module.model,
+        label: module.label,
+      })),
+      currentBlockIdRef.current ?? undefined,
+      {
+        signal: controller.signal,
+        timeoutMs: hardTimeoutMs,
+      },
+    )
+      .then((result) => {
+        clearJobHandles()
+        const emptyModules: RibbonModuleConfig[] = []
+
+        for (const { module, jobId, origin } of jobs) {
+          const taggedItems = withSnapshotId(result.byModuleId[module.id] ?? [], snapshotId)
+          if (taggedItems.length === 0) {
+            emptyModules.push(module)
+          }
+          if (taggedItems.length > 0) {
+            setEchoes((prev) => flowHistory.append(documentIdForJob, taggedItems, prev))
+          }
+
+          setRibbonState((prev) => {
+            const snapshot = prev.currentSnapshot
+            if (!snapshot || snapshot.id !== snapshotId || taggedItems.length === 0) {
+              return ribbonEngine.markJobDone(prev, jobId)
+            }
+            const patched = ribbonEngine.ingestAi(prev, snapshot, taggedItems, origin, slotCount)
+            return ribbonEngine.markJobDone(patched, jobId)
+          })
+        }
+
+        if (emptyModules.length > 0 && refreshRequestIdRef.current === snapshotId && !settings.lowLatencyMode) {
+          devLog.push('ribbon', 'background ai batch empty-module fallback', {
+            snapshotId,
+            modules: emptyModules.map((module) => module.id),
+          })
+          return Promise.all(
+            emptyModules.map((module) =>
+              runBackgroundModule(snapshotId, documentIdForJob, slotCount, text, ragResults, module),
+            ),
+          ).then(() => {})
+        }
+      })
+      .catch((err) => {
+        clearJobHandles()
+        const message = (err as Error)?.message ?? 'unknown'
+        devLog.push('ribbon', 'background ai batch failed', {
+          snapshotId,
+          modules: batchableModules.map((module) => module.id),
+          error: message,
+        })
+        setRibbonState((prev) =>
+          jobs.reduce((state, { jobId }) => ribbonEngine.markJobFailed(state, jobId, message), prev),
+        )
+        throw err
+      })
+      .finally(() => {
+        if (Object.keys(backgroundJobControllersRef.current).length === 0) {
+          setAiStatus(hasApiKey ? 'connected' : 'unconfigured')
+        }
+      })
   }, [hasApiKey, settings])
 
   const cancelActiveRibbonJobs = useCallback((reason: string) => {
@@ -943,21 +1197,48 @@ export default function Home() {
       const aiModules = sortRibbonModulesForExecution(
         enabledModules.filter((module) => module.type !== 'rag' && module.type !== 'quick'),
       )
+      const batchModules = aiModules.filter((module) => canBatchGenerateEchoesForModule(module))
+      const singleModules = aiModules.filter((module) => !canBatchGenerateEchoesForModule(module))
 
       void (async () => {
-        const queue = [...aiModules]
-        const workerCount = Math.min(RIBBON_BACKGROUND_CONCURRENCY, queue.length)
+        const runQueuedModules = async (queuedModules: RibbonModuleConfig[]) => {
+          const queue = [...queuedModules]
+          const workerCount = Math.min(RIBBON_BACKGROUND_CONCURRENCY, queue.length)
 
-        await Promise.all(
-          Array.from({ length: workerCount }, async () => {
-            while (queue.length > 0) {
-              if (refreshRequestIdRef.current !== snapshot.id) return
-              const nextModule = queue.shift()
-              if (!nextModule) return
-              await runBackgroundModule(snapshot.id, documentId, slotCount, trimmed, stableEchoes, nextModule)
-            }
-          }),
-        )
+          await Promise.all(
+            Array.from({ length: workerCount }, async () => {
+              while (queue.length > 0) {
+                if (refreshRequestIdRef.current !== snapshot.id) return
+                const nextModule = queue.shift()
+                if (!nextModule) return
+                await runBackgroundModule(snapshot.id, documentId, slotCount, trimmed, stableEchoes, nextModule)
+              }
+            }),
+          )
+        }
+
+        const tasks: Array<Promise<void>> = []
+
+        if (batchModules.length >= 2) {
+          tasks.push(
+            runBackgroundModuleBatch(snapshot.id, documentId, slotCount, trimmed, stableEchoes, batchModules).catch((err) => {
+              devLog.push('ribbon', 'background ai batch fallback to single-module queue', {
+                snapshotId: snapshot.id,
+                modules: batchModules.map((module) => module.id),
+                error: (err as Error)?.message ?? 'unknown',
+              })
+              return runQueuedModules(batchModules)
+            }),
+          )
+        } else if (batchModules.length === 1) {
+          singleModules.unshift(batchModules[0])
+        }
+
+        if (singleModules.length > 0) {
+          tasks.push(runQueuedModules(singleModules))
+        }
+
+        await Promise.all(tasks)
       })()
     } catch (err) {
       setAiStatus(hasApiKey ? 'error' : 'unconfigured')
@@ -974,7 +1255,7 @@ export default function Home() {
     } finally {
       refreshAbortRef.current = null
     }
-  }, [cancelActiveRibbonJobs, documentId, hasApiKey, renderedRibbonSlots, ribbonRestoreFrozen, runBackgroundModule, settings, throttledErrorToast])
+  }, [cancelActiveRibbonJobs, documentId, hasApiKey, renderedRibbonSlots, ribbonRestoreFrozen, runBackgroundModule, runBackgroundModuleBatch, settings, throttledErrorToast])
 
   const pauseMs = Math.min(10, Math.max(1, settings.ribbonPauseSeconds ?? 2)) * 1000
   const { beat, stop: stopHeartbeat } = useHeartbeat({
@@ -1130,12 +1411,13 @@ export default function Home() {
       return
     }
     setSensoryZoomLoading(true)
+    setShowClichePopover(false)
     setSensoryZoomResults(null)
     try {
       const items = await expandSensoryZoom(baseText, content, base.id, settings)
       setSensoryZoomResults(items)
     } catch {
-      toast.error('鎰熷畼鏀惧ぇ澶辫触')
+      toast.error('感官放大失败')
     } finally {
       setSensoryZoomLoading(false)
     }
@@ -1168,6 +1450,7 @@ export default function Home() {
     }
     const query = (paragraphForCliche.trim().slice(0, 200) || clicheMatches[0]?.phrase) ?? ''
     if (!query) return
+    setSensoryZoomResults(null)
     setShowClichePopover(true)
     setClicheAlternativesLoading(true)
     setClicheAlternatives([])
@@ -1176,7 +1459,7 @@ export default function Home() {
       const items = candidates.slice(0, 5).map(({ baseScore: _b, finalScore: _f, ...item }) => item as EchoItem)
       setClicheAlternatives(items)
     } catch {
-      toast.error('鑾峰彇鏇夸唬琛ㄨ揪澶辫触')
+      toast.error('获取替代表达失败')
     } finally {
       setClicheAlternativesLoading(false)
     }
@@ -2011,73 +2294,38 @@ export default function Home() {
             </div>
 
             {sensoryZoomResults != null && sensoryZoomResults.length > 0 && (
-              <div className="fixed left-6 top-1/2 -translate-y-1/2 z-50 max-w-sm w-[320px] p-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg max-h-64 overflow-y-auto">
-                <div className="flex justify-between items-center mb-2">
-                  <span className="text-xs font-medium text-[var(--color-ink-faint)]">感官放大，点击复制</span>
-                  <button
-                    type="button"
-                    onClick={() => setSensoryZoomResults(null)}
-                    className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] p-1"
-                    aria-label="鍏抽棴"
-                  >
-                    脳
-                  </button>
-                </div>
-                <ul className="space-y-1.5">
-                  {sensoryZoomResults.map((item) => (
-                    <li key={item.id}>
-                      <button
-                        type="button"
-                        className="w-full text-left text-sm py-1.5 px-2 rounded hover:bg-[var(--color-paper)] text-[var(--color-ink)]"
-                        onClick={() => {
-                          const copied = item.originalText ?? item.content ?? ''
-                          navigator.clipboard.writeText(copied).then(() => toast.success('已复制'), () => {})
-                        }}
-                      >
-                        {item.content}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              <FloatingResultPanel
+                title="感官放大"
+                subtitle="从共鸣库里提一组更细的触觉、听觉或视觉细节。"
+                emptyText="这次没有拿到可用细节。"
+                items={sensoryZoomResults.map((item) => ({
+                  id: item.id,
+                  content: item.content,
+                  onClick: () => {
+                    const copied = item.originalText ?? item.content ?? ''
+                    navigator.clipboard.writeText(copied).then(() => toast.success('已复制'), () => {})
+                  },
+                }))}
+                onClose={() => setSensoryZoomResults(null)}
+              />
             )}
 
             {showClichePopover && (
-              <div className="fixed left-6 top-1/2 -translate-y-1/2 z-50 max-w-sm w-[320px] p-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg max-h-64 overflow-y-auto">
-                <div className="flex justify-between items-center mb-2">
-                  <span className="text-xs font-medium text-[var(--color-ink-faint)]">非套路化替代表达，点击复制</span>
-                  <button
-                    type="button"
-                    onClick={() => setShowClichePopover(false)}
-                    className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] p-1"
-                    aria-label="鍏抽棴"
-                  >
-                    脳
-                  </button>
-                </div>
-                {clicheAlternativesLoading ? (
-                  <p className="text-sm text-[var(--color-ink-faint)]">加载中…</p>
-                ) : clicheAlternatives.length === 0 ? (
-                  <p className="text-sm text-[var(--color-ink-faint)]">未找到相关替代表达</p>
-                ) : (
-                  <ul className="space-y-1.5">
-                    {clicheAlternatives.map((item) => (
-                      <li key={item.id}>
-                        <button
-                          type="button"
-                          className="w-full text-left text-sm py-1.5 px-2 rounded hover:bg-[var(--color-paper)] text-[var(--color-ink)]"
-                          onClick={() => {
-                            const copied = item.originalText ?? item.content ?? ''
-                            navigator.clipboard.writeText(copied).then(() => toast.success('已复制'), () => {})
-                          }}
-                        >
-                          {item.content}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+              <FloatingResultPanel
+                title="非套路替代表达"
+                subtitle="保留当前意思，换成更不顺手滑出的说法。"
+                loading={clicheAlternativesLoading}
+                emptyText="暂时没找到更合适的替代表达。"
+                items={clicheAlternatives.map((item) => ({
+                  id: item.id,
+                  content: item.content,
+                  onClick: () => {
+                    const copied = item.originalText ?? item.content ?? ''
+                    navigator.clipboard.writeText(copied).then(() => toast.success('已复制'), () => {})
+                  },
+                }))}
+                onClose={() => setShowClichePopover(false)}
+              />
             )}
           </div>
         </main>

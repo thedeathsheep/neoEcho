@@ -1,7 +1,7 @@
 ﻿'use client'
 
 import { useRouter } from 'next/navigation'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
 import { AboutModal } from '@/components/help/about-modal'
@@ -19,7 +19,7 @@ import { generatePromptFromDescription,getDefaultPromptForModule, validateApiKey
 import { customPromptService } from '@/services/custom-prompt.service'
 import { validateEmbeddingApi } from '@/services/embedding.service'
 import { knowledgeBaseService } from '@/services/knowledge-base.service'
-import type { AllocationMode,RibbonModuleConfig, RibbonModuleType, RibbonSlotCount } from '@/types'
+import type { RibbonModuleConfig, RibbonModuleType, RibbonSlotCount } from '@/types'
 
 const PRESETS = [
   { label: 'DeepSeek', url: 'https://api.deepseek.com', model: 'deepseek-chat' },
@@ -293,9 +293,6 @@ export default function SettingsPage() {
   const [ribbonSlotCount, setRibbonSlotCount] = useState<RibbonSlotCount>(
     (initialRibbonSettings?.slotCount ?? 5) as RibbonSlotCount
   )
-  const [allocationMode, setAllocationMode] = useState<AllocationMode>(
-    (initialRibbonSettings?.allocationMode ?? 'balanced') as AllocationMode
-  )
   const [ribbonModules, setRibbonModules] = useState<RibbonModuleConfig[]>(initialRibbonModules)
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>(settings.theme ?? 'light')
   const [fontSize, setFontSize] = useState<'small' | 'medium' | 'large'>(settings.fontSize ?? 'medium')
@@ -402,7 +399,6 @@ export default function SettingsPage() {
       ribbonPauseSeconds: Math.min(10, Math.max(1, ribbonPauseSeconds)),
       ribbonSettings: {
         slotCount: ribbonSlotCount,
-        allocationMode,
         modules: [
           ...BUILTIN_RIBBON_MODULES.filter((b) => b.type !== 'quick').map((b) => {
             const saved = sanitizedRibbonModules.find((m) => m.id === b.id)
@@ -484,6 +480,10 @@ export default function SettingsPage() {
     error: validationMsg || '连接失败',
   }
   const hasApiKey = apiKey.trim().length > 0
+  const modelCardTitle = model.trim() || '未填写模型名'
+  const modelCardMeta = hasApiKey
+    ? (baseUrl.trim() ? baseUrl.replace(/^https?:\/\//, '') : '未填写服务地址')
+    : '未配置 API Key'
   const enabledAmbientModuleCount = countEnabledAmbientModules(ribbonModules)
   const ambientPromptCount = getAmbientCustomPrompts().length
   const ribbonLoadLabel =
@@ -492,6 +492,103 @@ export default function SettingsPage() {
       : enabledAmbientModuleCount === 0
         ? '未启用'
         : '正常'
+  const hasUnsavedChanges = useMemo(() => {
+    const savedRibbonModules = buildRibbonModulesForSettings(
+      settings.ribbonSettings?.modules?.length
+        ? settings.ribbonSettings.modules
+        : BUILTIN_RIBBON_MODULES.filter((m) => m.type !== 'quick').map((m) => ({
+            ...m,
+            enabled: m.id === 'rag' || m.id === 'ai:imagery',
+            pinned: false,
+          })),
+    )
+    const currentDraft = JSON.stringify({
+      apiKey,
+      model,
+      baseUrl,
+      ribbonRunProfile,
+      semanticExpansion,
+      ribbonAiFilter,
+      ragRerankEnabled,
+      sensoryZoomEnabled,
+      clicheDetectionEnabled,
+      ribbonFilterModel: ribbonFilterModel.trim(),
+      ribbonPauseSeconds,
+      ribbonSlotCount,
+      ribbonModules: sanitizeRibbonModules(ribbonModules),
+      theme,
+      fontSize,
+      useEmbeddingApi,
+      embeddingBaseUrl,
+      embeddingApiKey,
+      embeddingModel,
+    })
+    const savedDraft = JSON.stringify({
+      apiKey: settings.apiKey,
+      model: settings.model,
+      baseUrl: settings.baseUrl,
+      ribbonRunProfile:
+        settings.ribbonRunProfile ??
+        (settings.reliableRibbonMode ? 'reliable' : settings.lowLatencyMode ? 'fast' : 'balanced'),
+      semanticExpansion: settings.semanticExpansion ?? false,
+      ribbonAiFilter: settings.ribbonAiFilter ?? false,
+      ragRerankEnabled: settings.ragRerankEnabled ?? false,
+      sensoryZoomEnabled: settings.sensoryZoomEnabled ?? true,
+      clicheDetectionEnabled: settings.clicheDetectionEnabled ?? false,
+      ribbonFilterModel: settings.ribbonFilterModel?.trim() ?? '',
+      ribbonPauseSeconds: settings.ribbonPauseSeconds ?? 2,
+      ribbonSlotCount: (settings.ribbonSettings?.slotCount ?? 5) as RibbonSlotCount,
+      ribbonModules: sanitizeRibbonModules(savedRibbonModules),
+      theme: settings.theme ?? 'light',
+      fontSize: settings.fontSize ?? 'medium',
+      useEmbeddingApi: settings.useEmbeddingApi ?? false,
+      embeddingBaseUrl: settings.embeddingBaseUrl ?? '',
+      embeddingApiKey: settings.embeddingApiKey ?? '',
+      embeddingModel: settings.embeddingModel ?? 'BAAI/bge-m3',
+    })
+    return currentDraft !== savedDraft
+  }, [
+    apiKey,
+    model,
+    baseUrl,
+    ribbonRunProfile,
+    semanticExpansion,
+    ribbonAiFilter,
+    ragRerankEnabled,
+    sensoryZoomEnabled,
+    clicheDetectionEnabled,
+    ribbonFilterModel,
+    ribbonPauseSeconds,
+    ribbonSlotCount,
+    ribbonModules,
+    theme,
+    fontSize,
+    useEmbeddingApi,
+    embeddingBaseUrl,
+    embeddingApiKey,
+    embeddingModel,
+    settings.apiKey,
+    settings.model,
+    settings.baseUrl,
+    settings.semanticExpansion,
+    settings.ribbonAiFilter,
+    settings.ragRerankEnabled,
+    settings.sensoryZoomEnabled,
+    settings.clicheDetectionEnabled,
+    settings.ribbonFilterModel,
+    settings.ribbonPauseSeconds,
+    settings.ribbonSettings?.slotCount,
+    settings.theme,
+    settings.fontSize,
+    settings.useEmbeddingApi,
+    settings.embeddingBaseUrl,
+    settings.embeddingApiKey,
+    settings.embeddingModel,
+    settings.ribbonRunProfile,
+    settings.lowLatencyMode,
+    settings.reliableRibbonMode,
+    settings.ribbonSettings?.modules,
+  ])
 
   return (
     <div className="min-h-screen bg-[var(--color-paper)] pb-24">
@@ -504,6 +601,15 @@ export default function SettingsPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <span
+              className={`rounded-full border px-3 py-1 text-xs ${
+                hasUnsavedChanges
+                  ? 'border-amber-300/70 bg-amber-500/10 text-amber-700'
+                  : 'border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-ink-faint)]'
+              }`}
+            >
+              {hasUnsavedChanges ? '有未保存更改' : '已同步'}
+            </span>
             <button
               onClick={() => setShowAbout(true)}
               className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm text-[var(--color-ink-light)] hover:text-[var(--color-ink)] hover:bg-[var(--color-ink)]/5 transition-colors"
@@ -512,9 +618,10 @@ export default function SettingsPage() {
             </button>
             <button
               onClick={handleSave}
-              className="px-5 py-2 bg-[var(--color-btn-primary-bg)] text-[var(--color-btn-primary-text)] rounded-lg hover:opacity-90 transition-opacity"
+              disabled={!hasUnsavedChanges}
+              className="px-5 py-2 bg-[var(--color-btn-primary-bg)] text-[var(--color-btn-primary-text)] rounded-lg hover:opacity-90 transition-opacity disabled:cursor-not-allowed disabled:opacity-45"
             >
-              保存设置
+              {hasUnsavedChanges ? '保存设置' : '已保存'}
             </button>
             <button
               onClick={() => router.back()}
@@ -530,10 +637,8 @@ export default function SettingsPage() {
         <div className="mb-8 grid gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper-warm)] p-4 sm:grid-cols-3">
           <div className="rounded-xl bg-[var(--color-surface)] px-4 py-3">
             <div className="text-xs text-[var(--color-ink-faint)]">主模型</div>
-            <div className="mt-1 text-sm font-medium text-[var(--color-ink)]">
-              {validationStatus === 'success' ? '已连接' : hasApiKey ? '待验证' : '未配置'}
-            </div>
-            <div className="mt-1 text-xs text-[var(--color-ink-faint)]">{model || '未填写模型名'}</div>
+            <div className="mt-1 text-sm font-medium text-[var(--color-ink)]">{modelCardTitle}</div>
+            <div className="mt-1 text-xs text-[var(--color-ink-faint)]">{modelCardMeta}</div>
           </div>
           <div className="rounded-xl bg-[var(--color-surface)] px-4 py-3">
             <div className="text-xs text-[var(--color-ink-faint)]">织带负载</div>
@@ -675,19 +780,10 @@ export default function SettingsPage() {
                 )}
               </div>
 
-              {(validationMsg || availableModels.length > 0 || validationStatus !== 'idle') && (
+              {validationStatus === 'error' && validationMsg && (
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)] px-3 py-2 text-xs">
-                  <span className={validationTone[validationStatus]}>
-                    {validationStatus === 'success' ? '✓' : validationStatus === 'error' ? '✗' : '•'} {validationCopy[validationStatus]}
-                  </span>
-                  {validationMsg && validationStatus !== 'success' && (
-                    <span className="text-[var(--color-ink-faint)]">{validationMsg}</span>
-                  )}
-                  {availableModels.length > 0 && (
-                    <span className="text-[var(--color-ink-faint)]">
-                      已发现 {availableModels.length} 个可用模型
-                    </span>
-                  )}
+                  <span className={validationTone.error}>✗ 连接失败</span>
+                  <span className="text-[var(--color-ink-faint)]">{validationMsg}</span>
                 </div>
               )}
             </div>
@@ -818,16 +914,16 @@ export default function SettingsPage() {
             )}
           </section>
 
-          {/* Ribbon filter model (same API as main chat, optional different model) */}
+          {/* Lightweight helper model (same API as main chat, optional different model) */}
           <section className="bg-[var(--color-paper-warm)] backdrop-blur rounded-xl border border-[var(--color-border)] p-6">
             <h2 className="text-lg font-medium text-[var(--color-ink)] mb-2">
-              过滤模型配置
+              轻量辅助模型
             </h2>
             <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-              用于织带结果 AI 过滤（去除页眉页脚等低价值片段）。使用主 API（上方对话接口），仅模型可不同。留空则使用主模型；可填小模型名（如 deepseek-chat、qwen-turbo）以提速。需先在「织带偏好」中开启「织带结果经 AI 过滤」。
+              使用主 API（上方对话接口），但允许单独指定一个更快的小模型，供织带里的轻量判断与编辑辅助复用。留空则继续使用主模型。
             </p>
             <div>
-              <label className="block text-sm text-[var(--color-ink-light)] mb-2">过滤用小模型</label>
+              <label className="block text-sm text-[var(--color-ink-light)] mb-2">辅助用小模型</label>
               <input
                 type="text"
                 value={ribbonFilterModel}
@@ -838,6 +934,9 @@ export default function SettingsPage() {
                 placeholder="留空则使用主模型"
                 className="w-full px-4 py-2 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg focus:outline-none focus:border-[var(--color-ink)] font-mono text-sm mb-3"
               />
+              <p className="text-xs text-[var(--color-ink-faint)] mb-3">
+                适合填写响应更快、成本更低的模型名，例如 `deepseek-chat`、`qwen-turbo` 一类；后续检索增强重新接回主链路时也会优先复用这里的配置。
+              </p>
               <div>
                 <button
                   type="button"
@@ -874,6 +973,17 @@ export default function SettingsPage() {
             </h2>
 
             <div className="space-y-6">
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-3">
+                <p className="text-sm text-[var(--color-ink)]">
+                  当前真正影响织带刷新节奏的，是
+                  <strong>停笔延迟、格数、启用模块、固定模块、运行档</strong>
+                  这五项。
+                </p>
+                <p className="mt-1 text-xs leading-relaxed text-[var(--color-ink-faint)]">
+                  旧的“内容分配模式”权重已经停用；现在实际走的是当前段落优先、固定模块优先和展示稳定性优先。
+                </p>
+              </div>
+
               {/* Ribbon update delay */}
               <div>
                 <label htmlFor="ribbonPauseSeconds" className="block text-sm text-[var(--color-ink-light)] mb-2">
@@ -926,27 +1036,32 @@ export default function SettingsPage() {
                 </p>
               </div>
 
-              {/* Allocation mode */}
-              <div>
-                <label className="block text-sm text-[var(--color-ink-light)] mb-2">
-                  内容分配模式
-                </label>
-                <select
-                  value={allocationMode}
-                  onChange={(e) => setAllocationMode(e.target.value as AllocationMode)}
-                  className="w-full px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm"
-                >
-                  <option value="balanced">均衡模式 - 各模块均匀分配</option>
-                  <option value="rag_priority">共鸣优先 - 优先展示知识库内容</option>
-                  <option value="ai_priority">灵感优先 - 优先展示AI生成内容</option>
-                  <option value="custom_priority">自定义优先 - 优先展示自定义模块</option>
-                </select>
-                <p className="text-xs text-[var(--color-ink-faint)] mt-1">
-                  {allocationMode === 'balanced' && '各模块按权重均衡分配'}
-                  {allocationMode === 'rag_priority' && '知识库内容占更多槽位'}
-                  {allocationMode === 'ai_priority' && 'AI 意象、润色等占更多槽位'}
-                  {allocationMode === 'custom_priority' && '自定义模块（如百科）占更多槽位'}
-                </p>
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-[var(--color-ink)]">当前展示规则</div>
+                    <p className="mt-1 text-xs leading-relaxed text-[var(--color-ink-faint)]">
+                      织带不再使用旧的“分配模式”权重，而是优先保证当前段落结果、固定模块和画面稳定，避免每次停笔都大幅洗牌。
+                    </p>
+                  </div>
+                  <span className="rounded-full border border-[var(--color-border)] px-2.5 py-1 text-[11px] text-[var(--color-ink-faint)]">
+                    自动生效
+                  </span>
+                </div>
+                <div className="mt-3 grid gap-2 text-xs text-[var(--color-ink-faint)] sm:grid-cols-2">
+                  <div className="rounded-lg bg-[var(--color-surface)] px-3 py-2">
+                    当前段落优先，尽量先展示与眼前文本最相关的结果。
+                  </div>
+                  <div className="rounded-lg bg-[var(--color-surface)] px-3 py-2">
+                    已固定的模块有候选时会优先保留，不会被轻易挤掉。
+                  </div>
+                  <div className="rounded-lg bg-[var(--color-surface)] px-3 py-2">
+                    尽量让已启用模块都有露出的机会，但不会为了凑平均强行打乱。
+                  </div>
+                  <div className="rounded-lg bg-[var(--color-surface)] px-3 py-2">
+                    会尽量保持可见结果稳定，减少上一轮刚出现就被整排替换。
+                  </div>
+                </div>
               </div>
 
               {/* Ribbon content modules */}
@@ -968,7 +1083,7 @@ export default function SettingsPage() {
                 />
                 <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-[var(--color-ink-faint)]">
                   <span>每多勾选 1 个非共鸣库模块，就会多出 1 个后台生成请求；详情型自定义模块不会进入这里。</span>
-                  <span>固定只影响展示优先级，不会让该模块跳过生成或超时；新建和编辑自定义模块都统一放在「自定义模块」里。</span>
+                  <span>固定现在是最直接的展示优先级控制，不会让该模块跳过生成或超时；新建和编辑自定义模块都统一放在「自定义模块」里。</span>
                   <button
                     onClick={() => setShowKbManager(true)}
                     className="hover:text-[var(--color-ink)] underline underline-offset-2 transition-colors"
@@ -1013,7 +1128,7 @@ export default function SettingsPage() {
                 </div>
                 {ribbonRunProfile === 'fast' && (
                   <p className="text-xs text-[var(--color-ink-faint)] leading-relaxed">
-                    已启用低延迟：将<strong>强制关闭</strong>「智能扩展查询词」与「RAG 重排」以降低等待时间。
+                    已启用低延迟：会更早放弃慢模块，并跳过空结果的二次补打，优先尽快给出首批可见结果。
                   </p>
                 )}
                 {ribbonRunProfile === 'reliable' && (
@@ -1021,121 +1136,88 @@ export default function SettingsPage() {
                     可靠（调试）档会优先确保你能看到产出：显示“生成中”占位卡、使用更长超时、并避免因探测失败而静默跳过模块。
                   </p>
                 )}
+                <div className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-surface)] px-3 py-2">
+                  <p className="text-xs font-medium text-[var(--color-ink)]">当前档位实际影响</p>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                    <span className="rounded-full bg-[var(--color-paper)] px-2 py-1 text-[var(--color-ink-faint)]">
+                      {isFastProfile ? '慢模块：更早超时' : '慢模块：标准等待'}
+                    </span>
+                    <span className="rounded-full bg-[var(--color-paper)] px-2 py-1 text-[var(--color-ink-faint)]">
+                      {isFastProfile ? '空结果：不补打' : '空结果：可补打'}
+                    </span>
+                    <span className="rounded-full bg-[var(--color-paper)] px-2 py-1 text-[var(--color-ink-faint)]">
+                      {ribbonRunProfile === 'reliable' ? '织带占位：显示生成中' : '织带占位：常规'}
+                    </span>
+                  </div>
+                </div>
               </div>
 
-              {/* Semantic expansion for RAG - optimized copy */}
-              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
-                <input
-                  type="checkbox"
-                  id="semanticExpansion"
-                  checked={semanticExpansion}
-                  disabled={isFastProfile}
-                  onChange={(e) => setSemanticExpansion(e.target.checked)}
-                  className="mt-0.5 rounded border-[var(--color-border)]"
-                />
-                <label htmlFor="semanticExpansion" className="flex-1 cursor-pointer">
-                  <span className="block font-medium text-sm text-[var(--color-ink)]">
-                    智能扩展查询词
-                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
-                      {semanticExpansion ? '已开启 · 召回优先' : '已关闭 · 速度优先'}
-                    </span>
+              <div className="rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-[var(--color-ink)]">检索增强（暂未接入当前织带刷新链路）</p>
+                    <p className="mt-1 text-xs leading-relaxed text-[var(--color-ink-faint)]">
+                      之前这里的「智能扩展查询词」「织带结果经 AI 过滤」「RAG 重排」容易让人误以为正在影响当前刷新。
+                      这三个选项已从主设置面收起，等重新接回主链路后再恢复可调。
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-[var(--color-paper-warm)] px-2 py-1 text-xs text-[var(--color-ink-faint)]">
+                    预留能力
                   </span>
-                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
-                    开启后，AI 会将「春天」扩展为「春天 花开 温暖 春风」等同义词再检索，能召回更多相关段落。
-                    <span className="text-[var(--color-ink-light)]">适合：找不到相关内容时尝试开启。</span>
-                    <br />
-                    <span className="text-[var(--color-accent)]">
-                      注意：会增加约 1-2 秒检索时间。{isFastProfile ? '低延迟档已强制关闭。' : ''}
-                    </span>
-                  </span>
-                </label>
+                </div>
               </div>
 
-              {/* Ribbon AI filter (post-retrieval) */}
-              <div className="flex items-start gap-3">
-                <input
-                  type="checkbox"
-                  id="ribbonAiFilter"
-                  checked={ribbonAiFilter}
-                  onChange={(e) => setRibbonAiFilter(e.target.checked)}
-                  className="mt-1 rounded border-[var(--color-border)]"
-                />
-                <label htmlFor="ribbonAiFilter" className="flex-1 cursor-pointer">
-                  <span className="block font-medium text-sm text-[var(--color-ink)]">
-                    织带结果经 AI 过滤
-                  </span>
-                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1">
-                    检索后用模型快速过滤掉页眉页脚、水印、元数据等低价值片段。过滤用模型在上方「织带过滤模型」中配置。
-                  </span>
-                </label>
-              </div>
+              <div className="pt-2 border-t border-[var(--color-border)]">
+                <div className="mb-3">
+                  <h3 className="text-sm font-medium text-[var(--color-ink)]">编辑辅助</h3>
+                  <p className="mt-1 text-xs text-[var(--color-ink-faint)]">
+                    下面两项作用于编辑器操作，不会改变织带刷新速度或模块调度。
+                  </p>
+                </div>
 
-              {/* RAG rerank (multi-view + AI rerank) */}
-              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
-                <input
-                  type="checkbox"
-                  id="ragRerankEnabled"
-                  checked={ragRerankEnabled}
-                  disabled={isFastProfile}
-                  onChange={(e) => setRagRerankEnabled(e.target.checked)}
-                  className="mt-0.5 rounded border-[var(--color-border)]"
-                />
-                <label htmlFor="ragRerankEnabled" className="flex-1 cursor-pointer">
-                  <span className="block font-medium text-sm text-[var(--color-ink)]">
-                    启用 RAG 重排
-                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
-                      {ragRerankEnabled ? '已开启' : '已关闭'}
-                    </span>
-                  </span>
-                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
-                    多视角检索（全文/当前句/关键词）后，用模型对候选打分重排，提升相关性。
-                    {isFastProfile ? '低延迟档已强制关闭。' : ''}
-                  </span>
-                </label>
-              </div>
+                <div className="space-y-3">
+                  <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
+                    <input
+                      type="checkbox"
+                      id="sensoryZoomEnabled"
+                      checked={sensoryZoomEnabled}
+                      onChange={(e) => setSensoryZoomEnabled(e.target.checked)}
+                      className="mt-0.5 rounded border-[var(--color-border)]"
+                    />
+                    <label htmlFor="sensoryZoomEnabled" className="flex-1 cursor-pointer">
+                      <span className="block font-medium text-sm text-[var(--color-ink)]">
+                        感官假肢（细节放大）
+                        <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
+                          {sensoryZoomEnabled ? '已开启' : '已关闭'}
+                        </span>
+                      </span>
+                      <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
+                        选中模糊感官句后点「感官放大」或 Alt+Z，从共鸣库涌现触觉、听觉、视觉等微观细节。
+                      </span>
+                    </label>
+                  </div>
 
-              {/* Sensory zoom */}
-              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
-                <input
-                  type="checkbox"
-                  id="sensoryZoomEnabled"
-                  checked={sensoryZoomEnabled}
-                  onChange={(e) => setSensoryZoomEnabled(e.target.checked)}
-                  className="mt-0.5 rounded border-[var(--color-border)]"
-                />
-                <label htmlFor="sensoryZoomEnabled" className="flex-1 cursor-pointer">
-                  <span className="block font-medium text-sm text-[var(--color-ink)]">
-                    感官假肢（细节放大）
-                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
-                      {sensoryZoomEnabled ? '已开启' : '已关闭'}
-                    </span>
-                  </span>
-                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
-                    选中模糊感官句后点「感官放大」或 Alt+Z，从共鸣库涌现触觉/听觉/视觉等微观细节。
-                  </span>
-                </label>
-              </div>
-
-              {/* Cliché / style entropy detection */}
-              <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
-                <input
-                  type="checkbox"
-                  id="clicheDetectionEnabled"
-                  checked={clicheDetectionEnabled}
-                  onChange={(e) => setClicheDetectionEnabled(e.target.checked)}
-                  className="mt-0.5 rounded border-[var(--color-border)]"
-                />
-                <label htmlFor="clicheDetectionEnabled" className="flex-1 cursor-pointer">
-                  <span className="block font-medium text-sm text-[var(--color-ink)]">
-                    风格熵增监测（套路语）
-                    <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
-                      {clicheDetectionEnabled ? '已开启' : '已关闭'}
-                    </span>
-                  </span>
-                  <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
-                    检测当前段落的陈词滥调，点击「套路语」从共鸣库获取非套路化替代表达。
-                  </span>
-                </label>
+                  <div className="flex items-start gap-3 p-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)]">
+                    <input
+                      type="checkbox"
+                      id="clicheDetectionEnabled"
+                      checked={clicheDetectionEnabled}
+                      onChange={(e) => setClicheDetectionEnabled(e.target.checked)}
+                      className="mt-0.5 rounded border-[var(--color-border)]"
+                    />
+                    <label htmlFor="clicheDetectionEnabled" className="flex-1 cursor-pointer">
+                      <span className="block font-medium text-sm text-[var(--color-ink)]">
+                        风格熵增监测（套路语）
+                        <span className="ml-2 text-xs font-normal text-[var(--color-ink-faint)]">
+                          {clicheDetectionEnabled ? '已开启' : '已关闭'}
+                        </span>
+                      </span>
+                      <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
+                        检测当前段落的陈词滥调，点击「套路语」从共鸣库获取非套路化替代表达。
+                      </span>
+                    </label>
+                  </div>
+                </div>
               </div>
 
               {/* Echo Gallery (curator report) */}

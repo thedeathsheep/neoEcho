@@ -1,7 +1,7 @@
 'use client'
 
 import { AnimatePresence, motion } from 'framer-motion'
-import { useMemo, useState } from 'react'
+import { type ReactNode, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
 import type {
@@ -158,15 +158,106 @@ function sceneChapterLabel(scene: Pick<SceneCard, 'chapterTitle'> | null | undef
 }
 
 function TabButton({ active, onClick, label }: { active: boolean; onClick: () => void; label: string }) {
-  return <button type="button" onClick={onClick} className={`rounded-full px-3 py-1.5 text-xs transition-colors ${active ? 'bg-[var(--color-ink)] text-[var(--color-surface)]' : 'bg-[var(--color-paper)] text-[var(--color-ink-light)] hover:text-[var(--color-ink)]'}`}>{label}</button>
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex h-10 items-center justify-center rounded-2xl border px-3 text-sm transition-all ${
+        active
+          ? 'border-[var(--color-ink)] bg-[var(--color-ink)] text-[var(--color-surface)] shadow-[0_10px_30px_rgba(15,23,42,0.18)]'
+          : 'border-[var(--color-border)] bg-[var(--color-paper)] text-[var(--color-ink-light)] hover:border-[var(--color-ink-light)] hover:text-[var(--color-ink)]'
+      }`}
+    >
+      {label}
+    </button>
+  )
 }
 
 function SummaryCard({ label, value }: { label: string; value: string | number }) {
-  return <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-3 py-2"><div className="text-lg font-semibold text-[var(--color-ink)]">{value}</div><div className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-ink-faint)]">{label}</div></div>
+  return (
+    <div className="rounded-[22px] border border-[var(--color-border)] bg-[var(--color-paper)] px-3 py-3">
+      <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--color-ink-faint)]">{label}</div>
+      <div className="mt-2 text-2xl font-semibold leading-none text-[var(--color-ink)]">{value}</div>
+    </div>
+  )
 }
 
 function TinyButton({ children, onClick, disabled }: { children: string; onClick: () => void; disabled?: boolean }) {
-  return <button type="button" onClick={onClick} disabled={disabled} className="rounded-full border border-[var(--color-border)] px-2.5 py-1 text-[10px] text-[var(--color-ink-light)] disabled:opacity-35">{children}</button>
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="inline-flex min-h-8 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-paper)] px-3 py-1.5 text-[11px] text-[var(--color-ink-light)] transition-colors hover:border-[var(--color-ink-light)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-35"
+    >
+      {children}
+    </button>
+  )
+}
+
+function SectionShell({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return (
+    <section className={`rounded-[24px] border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-4 ${className}`}>
+      {children}
+    </section>
+  )
+}
+
+function SectionIntro({
+  title,
+  detail,
+  meta,
+  action,
+}: {
+  title: string
+  detail: string
+  meta?: ReactNode
+  action?: ReactNode
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-[15px] font-semibold text-[var(--color-ink)]">{title}</p>
+          {meta}
+        </div>
+        <p className="mt-1 text-xs leading-6 text-[var(--color-ink-light)]">{detail}</p>
+      </div>
+      {action}
+    </div>
+  )
+}
+
+function QuickActionButton({
+  title,
+  detail,
+  onClick,
+  disabled,
+}: {
+  title: string
+  detail: string
+  onClick: () => void
+  disabled?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-[22px] border border-[var(--color-border)] bg-[var(--color-paper)] px-3 py-3 text-left transition-colors hover:border-[var(--color-ink-light)] hover:bg-[var(--color-surface)] disabled:cursor-not-allowed disabled:opacity-35"
+    >
+      <p className="text-sm font-medium text-[var(--color-ink)]">{title}</p>
+      <p className="mt-1 text-[11px] leading-5 text-[var(--color-ink-faint)]">{detail}</p>
+    </button>
+  )
+}
+
+function EmptyStateBox({ children }: { children: ReactNode }) {
+  return (
+    <div className="rounded-[20px] border border-dashed border-[var(--color-border)] bg-[var(--color-surface)]/55 px-3 py-3 text-[11px] leading-6 text-[var(--color-ink-faint)]">
+      {children}
+    </div>
+  )
 }
 
 function ProfileSignalCard({
@@ -488,19 +579,19 @@ function ChapterSceneCard({
 
 function ResultSection({ result, emptyText, primaryLabel, secondaryLabel, onPrimary, onSecondary }: { result: WritingAssistResult | null | undefined; emptyText: string; primaryLabel: string; secondaryLabel?: string; onPrimary: (item: WritingSuggestion) => void; onSecondary?: (item: WritingSuggestion) => void }) {
   if (!result || result.items.length === 0) {
-    return <div className="rounded-xl border border-dashed border-[var(--color-border)] px-3 py-3 text-[11px] leading-6 text-[var(--color-ink-faint)]">{emptyText}</div>
+    return <EmptyStateBox>{emptyText}</EmptyStateBox>
   }
 
   return (
     <div className="space-y-3">
-      {result.summary && <div className="rounded-xl bg-[var(--color-surface)] px-3 py-2 text-xs leading-6 text-[var(--color-ink-light)]">{result.summary}</div>}
+      {result.summary && <div className="rounded-2xl bg-[var(--color-surface)] px-3 py-3 text-xs leading-6 text-[var(--color-ink-light)]">{result.summary}</div>}
       {result.items.map((item) => (
-        <div key={item.id} className="rounded-xl border border-[var(--color-border)] bg-[var(--color-paper)] px-3 py-3">
-          <div className="flex items-center gap-2">
+        <div key={item.id} className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-3 py-3">
+          <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm font-medium text-[var(--color-ink)]">{item.title}</p>
             {item.tag && <span className="rounded-full bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">{item.tag}</span>}
           </div>
-          <p className="mt-1 text-xs leading-6 text-[var(--color-ink-light)]">{item.detail}</p>
+          <p className="mt-2 text-xs leading-6 text-[var(--color-ink-light)]">{item.detail}</p>
           <div className="mt-3 flex flex-wrap gap-2">
             <TinyButton onClick={() => onPrimary(item)}>{primaryLabel}</TinyButton>
             {secondaryLabel && onSecondary && <TinyButton onClick={() => onSecondary(item)}>{secondaryLabel}</TinyButton>}
@@ -961,18 +1052,33 @@ export function WritingAssistantPanel(props: WritingAssistantPanelProps) {
   }
 
   if (!isOpen) {
-    return <div className="fixed bottom-6 left-24 z-[60]"><button type="button" onClick={() => setIsOpen(true)} className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)]/92 px-4 py-2 text-sm text-[var(--color-ink)] shadow-sm backdrop-blur transition-colors hover:bg-[var(--color-paper)]" title="写作台">写作台</button></div>
+    return (
+      <div className="fixed bottom-6 left-4 z-[60] md:left-24">
+        <button
+          type="button"
+          onClick={() => setIsOpen(true)}
+          className="min-w-[248px] rounded-[24px] border border-[var(--color-border)] bg-[var(--color-surface)]/94 px-4 py-3 text-left text-sm text-[var(--color-ink)] shadow-sm backdrop-blur transition-all hover:border-[var(--color-ink-faint)] hover:bg-[var(--color-paper)]"
+          title="写作台"
+        >
+          写作台
+        </button>
+      </div>
+    )
   }
 
   return (
     <AnimatePresence>
-      <motion.aside initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }} className="fixed bottom-6 left-24 z-[60] flex max-h-[78vh] w-[400px] flex-col overflow-hidden rounded-[28px] border border-[var(--color-border)] bg-[var(--color-surface)]/96 shadow-[0_24px_60px_rgba(15,23,42,0.16)] backdrop-blur-xl">
-        <div className="border-b border-[var(--color-border)] px-5 py-4">
+      <motion.aside initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }} className="fixed bottom-6 left-4 z-[60] flex max-h-[82vh] w-[min(560px,calc(100vw-2rem))] flex-col overflow-hidden rounded-[30px] border border-[var(--color-border)] bg-[var(--color-surface)]/96 shadow-[0_28px_80px_rgba(15,23,42,0.22)] backdrop-blur-xl md:left-24 md:w-[560px]">
+        <div className="border-b border-[var(--color-border)] px-6 py-5">
           <div className="flex items-start justify-between gap-4">
-            <div><p className="text-[11px] uppercase tracking-[0.2em] text-[var(--color-ink-faint)]">Current Scene</p><h3 className="mt-1 text-lg font-semibold text-[var(--color-ink)]">写作台</h3><p className="mt-1 text-xs leading-6 text-[var(--color-ink-light)]">围绕当前这一场做结构检查、人物提醒和修订收口。</p></div>
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] uppercase tracking-[0.26em] text-[var(--color-ink-faint)]">Current Scene</p>
+              <h3 className="mt-2 text-[30px] font-semibold leading-none text-[var(--color-ink)]">写作台</h3>
+              <p className="mt-3 max-w-[30rem] text-sm leading-7 text-[var(--color-ink-light)]">围绕当前这一场做结构检查、人物提醒、素材归拢和修订收口。</p>
+            </div>
             <TinyButton onClick={() => setIsOpen(false)}>关闭</TinyButton>
           </div>
-          <div className="mt-4 grid grid-cols-7 gap-2">
+          <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
             <SummaryCard label="采纳" value={profile.adoptedCount} />
             <SummaryCard label="素材" value={profile.materialCount} />
             <SummaryCard label="修订" value={profile.openRevisionCount} />
@@ -981,60 +1087,116 @@ export function WritingAssistantPanel(props: WritingAssistantPanelProps) {
             <SummaryCard label="人物" value={profile.openCharacterWatchCount} />
             <SummaryCard label="快照" value={profile.snapshotCount} />
           </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <TinyButton onClick={onCaptureSelection} disabled={!selectedText.trim()}>收纳选中文本</TinyButton>
-            <TinyButton onClick={onCaptureEcho} disabled={!selectedEcho}>收纳当前回声</TinyButton>
-            <TinyButton onClick={onAddSceneFromCurrent} disabled={!currentParagraph.trim()}>从当前段落建卡</TinyButton>
-            <TinyButton onClick={() => { onCreateSnapshot(snapshotNote); setSnapshotNote('') }}>创建快照</TinyButton>
+          <div className="mt-5 grid grid-cols-2 gap-2">
+            <QuickActionButton title="收纳选中文本" detail={selectedText.trim() ? '把正文片段收进素材台。' : '先选中一段正文再收纳。'} onClick={onCaptureSelection} disabled={!selectedText.trim()} />
+            <QuickActionButton title="收纳当前回声" detail={selectedEcho ? '把织带里的线索收进写作台。' : '先选中一条回声。'} onClick={onCaptureEcho} disabled={!selectedEcho} />
+            <QuickActionButton title="从当前段落建卡" detail={currentParagraph.trim() ? '把这一段绑定成当前场景。' : '把光标放进正文某一段。'} onClick={onAddSceneFromCurrent} disabled={!currentParagraph.trim()} />
+            <QuickActionButton title="创建快照" detail="在大改前先存一个安全回退点。" onClick={() => { onCreateSnapshot(snapshotNote); setSnapshotNote('') }} />
           </div>
         </div>
-        <div className="border-b border-[var(--color-border)] px-4 py-3"><div className="flex flex-wrap gap-2"><TabButton active={tab === 'today'} onClick={() => setTab('today')} label="当前场景" /><TabButton active={tab === 'memory'} onClick={() => setTab('memory')} label="记忆" /><TabButton active={tab === 'revisions'} onClick={() => setTab('revisions')} label="修订" /><TabButton active={tab === 'materials'} onClick={() => setTab('materials')} label="素材" /><TabButton active={tab === 'scenes'} onClick={() => setTab('scenes')} label="场景" /><TabButton active={tab === 'snapshots'} onClick={() => setTab('snapshots')} label="快照" /></div></div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        <div className="border-b border-[var(--color-border)] px-5 py-4">
+          <div className="grid grid-cols-3 gap-2">
+            <TabButton active={tab === 'today'} onClick={() => setTab('today')} label="当前场景" />
+            <TabButton active={tab === 'memory'} onClick={() => setTab('memory')} label="记忆" />
+            <TabButton active={tab === 'revisions'} onClick={() => setTab('revisions')} label="修订" />
+            <TabButton active={tab === 'materials'} onClick={() => setTab('materials')} label="素材" />
+            <TabButton active={tab === 'scenes'} onClick={() => setTab('scenes')} label="场景" />
+            <TabButton active={tab === 'snapshots'} onClick={() => setTab('snapshots')} label="快照" />
+          </div>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
           {tab === 'today' && (
             <div className="space-y-4">
-              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div><p className="text-sm font-medium text-[var(--color-ink)]">当前场景卡</p><p className="mt-1 text-xs leading-6 text-[var(--color-ink-light)]">先确认你正在写的是哪一场，再做结构和人物检查。</p></div>
-                  {!currentScene && currentParagraph.trim() && <TinyButton onClick={onAddSceneFromCurrent}>从当前段落建卡</TinyButton>}
-                </div>
+              <SectionShell className="px-5 py-5">
+                <SectionIntro
+                  title="当前场景卡"
+                  detail="先把这一段绑定到具体场景，后面的结构、人物和修订都会围绕它展开。"
+                  action={!currentScene && currentParagraph.trim() ? <TinyButton onClick={onAddSceneFromCurrent}>从当前段落建卡</TinyButton> : undefined}
+                />
                 {currentScene ? (
-                  <div className="mt-3 rounded-xl bg-[var(--color-surface)] px-3 py-3"><div className="flex items-center gap-2"><p className="text-sm font-medium text-[var(--color-ink)]">{currentScene.title}</p><span className="rounded-full bg-[var(--color-paper)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">当前场景</span><span className="rounded-full bg-[var(--color-paper)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">{sceneChapterLabel(currentScene)}</span></div><p className="mt-2 text-xs leading-6 text-[var(--color-ink-light)]">{currentScene.summary}</p>{currentChapterGroup && <div className="mt-3 rounded-xl bg-[var(--color-paper)] px-3 py-2 text-[11px] leading-6 text-[var(--color-ink-light)]">所在章节：{currentChapterGroup.title} · {currentChapterGroup.rows.length} 场 · 修订 {currentChapterGroup.openRevisionCount} · 人物 {currentChapterGroup.openWatchCount}</div>}{currentScene.goal && <p className="mt-3 text-[11px] leading-6 text-[var(--color-ink-faint)]">目标：{currentScene.goal}</p>}{currentScene.tension && <p className="mt-1 text-[11px] leading-6 text-[var(--color-ink-faint)]">张力：{currentScene.tension}</p>}{currentSceneBlueprint && <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-[var(--color-ink-faint)]"><span className="rounded-full bg-[var(--color-paper)] px-2 py-1">修订 {currentSceneBlueprint.stats.openRevisionCount}</span><span className="rounded-full bg-[var(--color-paper)] px-2 py-1">人物 {currentSceneBlueprint.stats.openWatchCount}</span><span className="rounded-full bg-[var(--color-paper)] px-2 py-1">待用素材 {currentSceneBlueprint.stats.queuedMaterialCount}</span><span className="rounded-full bg-[var(--color-paper)] px-2 py-1">记忆 {currentSceneBlueprint.stats.memoryCount}</span></div>}{currentSceneBlueprint && <div className="mt-2 rounded-xl bg-[var(--color-paper)] px-3 py-2 text-[11px] leading-6 text-[var(--color-ink-light)]">下一步：{currentSceneBlueprint.stats.nextAction}</div>}{currentScene.contextExcerpt && <p className="mt-2 text-[11px] leading-6 text-[var(--color-ink-faint)]">绑定段落：{currentScene.contextExcerpt}</p>}{currentScene.lastReviewedAt && <p className="mt-1 text-[10px] tracking-[0.16em] text-[var(--color-ink-faint)]">最近检查：{formatTime(currentScene.lastReviewedAt)}</p>}</div>
+                  <div className="mt-4 rounded-[22px] bg-[var(--color-surface)] px-4 py-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-base font-semibold text-[var(--color-ink)]">{currentScene.title}</p>
+                      <span className="rounded-full bg-[var(--color-paper)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">当前场景</span>
+                      <span className="rounded-full bg-[var(--color-paper)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">{sceneChapterLabel(currentScene)}</span>
+                    </div>
+                    <p className="mt-3 text-sm leading-7 text-[var(--color-ink-light)]">{currentScene.summary}</p>
+                    {(currentScene.goal || currentScene.tension) && (
+                      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                        <div className="rounded-2xl bg-[var(--color-paper)] px-3 py-3">
+                          <p className="text-[10px] uppercase tracking-[0.2em] text-[var(--color-ink-faint)]">目标</p>
+                          <p className="mt-2 text-xs leading-6 text-[var(--color-ink-light)]">{currentScene.goal || '待补充'}</p>
+                        </div>
+                        <div className="rounded-2xl bg-[var(--color-paper)] px-3 py-3">
+                          <p className="text-[10px] uppercase tracking-[0.2em] text-[var(--color-ink-faint)]">张力</p>
+                          <p className="mt-2 text-xs leading-6 text-[var(--color-ink-light)]">{currentScene.tension || '待补充'}</p>
+                        </div>
+                      </div>
+                    )}
+                    {currentChapterGroup && (
+                      <div className="mt-4 rounded-2xl bg-[var(--color-paper)] px-3 py-3 text-[11px] leading-6 text-[var(--color-ink-light)]">
+                        所在章节：{currentChapterGroup.title} · {currentChapterGroup.rows.length} 场 · 修订 {currentChapterGroup.openRevisionCount} · 人物 {currentChapterGroup.openWatchCount}
+                      </div>
+                    )}
+                    {currentSceneBlueprint && (
+                      <>
+                        <div className="mt-4 flex flex-wrap gap-2 text-[11px] text-[var(--color-ink-faint)]">
+                          <span className="rounded-full bg-[var(--color-paper)] px-2 py-1">修订 {currentSceneBlueprint.stats.openRevisionCount}</span>
+                          <span className="rounded-full bg-[var(--color-paper)] px-2 py-1">人物 {currentSceneBlueprint.stats.openWatchCount}</span>
+                          <span className="rounded-full bg-[var(--color-paper)] px-2 py-1">待用素材 {currentSceneBlueprint.stats.queuedMaterialCount}</span>
+                          <span className="rounded-full bg-[var(--color-paper)] px-2 py-1">记忆 {currentSceneBlueprint.stats.memoryCount}</span>
+                        </div>
+                        <div className="mt-3 rounded-2xl bg-[var(--color-paper)] px-3 py-3 text-[11px] leading-6 text-[var(--color-ink-light)]">
+                          下一步：{currentSceneBlueprint.stats.nextAction}
+                        </div>
+                      </>
+                    )}
+                    {currentScene.contextExcerpt && <p className="mt-3 text-[11px] leading-6 text-[var(--color-ink-faint)]">绑定段落：{currentScene.contextExcerpt}</p>}
+                    {currentScene.lastReviewedAt && <p className="mt-2 text-[10px] tracking-[0.16em] text-[var(--color-ink-faint)]">最近检查：{formatTime(currentScene.lastReviewedAt)}</p>}
+                  </div>
                 ) : (
-                  <div className="mt-3 rounded-xl border border-dashed border-[var(--color-border)] px-3 py-3 text-[11px] leading-6 text-[var(--color-ink-faint)]">{currentParagraph.trim() ? '当前段落还没有绑定场景卡。先建一张卡，后面的结构诊断、人物提醒和修订会更稳定地围绕这一场工作。' : '把光标放在正文某一段，写作台就会围绕当前这一场开始工作。'}</div>
+                  <div className="mt-4">
+                    <EmptyStateBox>
+                      {currentParagraph.trim() ? '当前段落还没有绑定场景卡。先建一张卡，后面的结构诊断、人物提醒和修订会更稳定地围绕这一场工作。' : '把光标放在正文某一段，写作台就会围绕当前这一场开始工作。'}
+                    </EmptyStateBox>
+                  </div>
                 )}
-              </div>
-              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-4">
-                <div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium text-[var(--color-ink)]">结构诊断</p><p className="mt-1 text-xs leading-6 text-[var(--color-ink-light)]">只看节奏、转折、冲突和信息顺序，不给正文。</p></div><TinyButton onClick={onRunPlotProgression} disabled={!currentParagraph.trim()}>{assistLoading.plot ? '检查中...' : '开始检查'}</TinyButton></div>
-                <div className="mt-3"><ResultSection result={assistResults.plot} emptyText="先跑一次结构诊断，结果会直接落到这里。" primaryLabel="加入修订" secondaryLabel={currentScene ? '写进场景卡' : undefined} onPrimary={(item) => onAddRevision({ title: item.title, detail: item.detail, kind: 'plot', priority: suggestionPriority(item, 'soon'), tags: item.tag ? [item.tag] : [] })} onSecondary={(item) => onApplyStructureInsightToCurrentScene(item.detail)} /></div>
-              </div>
+              </SectionShell>
 
-              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-4">
-                <div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium text-[var(--color-ink)]">人物一致性</p><p className="mt-1 text-xs leading-6 text-[var(--color-ink-light)]">检查语气、行为、目标和关系反应有没有突然漂移。</p></div><TinyButton onClick={onRunCharacterConsistency} disabled={!currentParagraph.trim()}>{assistLoading.character ? '检查中...' : '开始检查'}</TinyButton></div>
-                <div className="mt-3"><ResultSection result={assistResults.character} emptyText="先跑一次人物一致性检查；如果没有明显问题，也会告诉你这一场暂时稳住了。" primaryLabel="加入修订" secondaryLabel="标记注意点" onPrimary={(item) => onAddRevision({ title: item.title, detail: item.detail, kind: 'character', priority: suggestionPriority(item, 'watch'), tags: item.tag ? [item.tag] : [] })} onSecondary={(item) => {
+              <div className="grid gap-4 sm:grid-cols-2">
+                <SectionShell className="px-5 py-5">
+                  <SectionIntro title="结构诊断" detail="只看节奏、转折、冲突和信息顺序，不给正文。" action={<TinyButton onClick={onRunPlotProgression} disabled={!currentParagraph.trim()}>{assistLoading.plot ? '检查中...' : '开始检查'}</TinyButton>} />
+                  <div className="mt-4"><ResultSection result={assistResults.plot} emptyText="先跑一次结构诊断，结果会直接落到这里。" primaryLabel="加入修订" secondaryLabel={currentScene ? '写进场景卡' : undefined} onPrimary={(item) => onAddRevision({ title: item.title, detail: item.detail, kind: 'plot', priority: suggestionPriority(item, 'soon'), tags: item.tag ? [item.tag] : [] })} onSecondary={(item) => onApplyStructureInsightToCurrentScene(item.detail)} /></div>
+                </SectionShell>
+
+                <SectionShell className="px-5 py-5">
+                  <SectionIntro title="人物一致性" detail="检查语气、行为、目标和关系反应有没有突然漂移。" action={<TinyButton onClick={onRunCharacterConsistency} disabled={!currentParagraph.trim()}>{assistLoading.character ? '检查中...' : '开始检查'}</TinyButton>} />
+                  <div className="mt-4"><ResultSection result={assistResults.character} emptyText="先跑一次人物一致性检查；如果没有明显问题，也会告诉你这一场暂时稳住了。" primaryLabel="加入修订" secondaryLabel="标记注意点" onPrimary={(item) => onAddRevision({ title: item.title, detail: item.detail, kind: 'character', priority: suggestionPriority(item, 'watch'), tags: item.tag ? [item.tag] : [] })} onSecondary={(item) => {
                   const characterName = inferCharacterNameFromText({ title: item.title, detail: item.detail, tag: item.tag, fallback: currentScene?.title })
                   onAddCharacterWatch({ title: item.title, characterName, detail: item.detail, sceneId: currentScene?.id, blockId: currentBlockId })
                   if (characterName) {
                     onAddMemoryNode({ type: 'character', title: characterName, detail: item.detail, sceneId: currentScene?.id, blockId: currentBlockId, source: 'character_watch' })
                   }
                 }} /></div>
+                </SectionShell>
               </div>
 
-              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-4">
-                <div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium text-[var(--color-ink)]">人物注意点</p><p className="mt-1 text-xs leading-6 text-[var(--color-ink-light)]">这一场里需要持续留心的人物漂移点，会先留在这里。</p></div><span className="rounded-full bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">{currentSceneWatchItems.length} 条</span></div>
-                <div className="mt-3 space-y-3">{currentSceneWatchItems.length > 0 ? currentSceneWatchItems.map((item) => <WatchRow key={item.id} item={item} onResolve={onUpdateCharacterWatchStatus} onRemove={onRemoveCharacterWatch} onFocusBlock={focusBlockFromWatch} />) : <div className="rounded-xl border border-dashed border-[var(--color-border)] px-3 py-3 text-[11px] leading-6 text-[var(--color-ink-faint)]">当前场景还没有人物注意点。跑一次人物一致性后，可以把值得持续关注的问题留下来。</div>}</div>
-              </div>
+              <SectionShell className="px-5 py-5">
+                <SectionIntro title="人物注意点" detail="这一场里需要持续留心的人物漂移点，会先留在这里。" meta={<span className="rounded-full bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">{currentSceneWatchItems.length} 条</span>} />
+                <div className="mt-4 space-y-3">{currentSceneWatchItems.length > 0 ? currentSceneWatchItems.map((item) => <WatchRow key={item.id} item={item} onResolve={onUpdateCharacterWatchStatus} onRemove={onRemoveCharacterWatch} onFocusBlock={focusBlockFromWatch} />) : <EmptyStateBox>当前场景还没有人物注意点。跑一次人物一致性后，可以把值得持续关注的问题留下来。</EmptyStateBox>}</div>
+              </SectionShell>
 
-              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-4">
-                <div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium text-[var(--color-ink)]">现在先改</p><p className="mt-1 text-xs leading-6 text-[var(--color-ink-light)]">先收口最该动手的 1-3 条问题，别让修订清单一直堆着。</p></div><TinyButton onClick={() => { onCreateSnapshot(snapshotNote); setSnapshotNote('') }}>先存一份快照</TinyButton></div>
+              <SectionShell className="px-5 py-5">
+                <SectionIntro title="现在先改" detail="先收口最该动手的 1-3 条问题，别让修订清单一直堆着。" action={<TinyButton onClick={() => { onCreateSnapshot(snapshotNote); setSnapshotNote('') }}>先存一份快照</TinyButton>} />
                 {needsSnapshotGuard && <div className="mt-3 rounded-xl border border-amber-300/60 bg-amber-50 px-3 py-2 text-[11px] leading-6 text-amber-700">现在优先级修订还没留快照。动手前先存一个版本，会更敢改。</div>}
-                <div className="mt-3 space-y-3">{nowRevisions.length > 0 ? nowRevisions.map((item) => <RevisionRow key={item.id} item={item} onUpdateStatus={onUpdateRevisionStatus} onRemove={onRemoveRevision} onFocusBlock={onFocusRevisionBlock} />) : <div className="rounded-xl border border-dashed border-[var(--color-border)] px-3 py-3 text-[11px] leading-6 text-[var(--color-ink-faint)]">当前没有“现在先改”的修订。结构和人物提醒都可以一键送进这里。</div>}</div>
+                <div className="mt-4 space-y-3">{nowRevisions.length > 0 ? nowRevisions.map((item) => <RevisionRow key={item.id} item={item} onUpdateStatus={onUpdateRevisionStatus} onRemove={onRemoveRevision} onFocusBlock={onFocusRevisionBlock} />) : <EmptyStateBox>当前没有“现在先改”的修订。结构和人物提醒都可以一键送进这里。</EmptyStateBox>}</div>
                 {latestSnapshot && <div className="mt-3 flex items-center justify-between gap-3 rounded-xl bg-[var(--color-surface)] px-3 py-2"><div><p className="text-[11px] font-medium text-[var(--color-ink)]">最近快照</p><p className="mt-1 text-[10px] tracking-[0.14em] text-[var(--color-ink-faint)]">{formatTime(latestSnapshot.createdAt)}</p></div><TinyButton onClick={() => onRestoreSnapshot(latestSnapshot)}>恢复最近快照</TinyButton></div>}
-              </div>
+              </SectionShell>
 
-              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-4">
-                <div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium text-[var(--color-ink)]">当前场景待用素材</p><p className="mt-1 text-xs leading-6 text-[var(--color-ink-light)]">把这一场暂时要用的片段先堆在这里，写的时候直接消费，不让素材继续躺在总列表里。</p></div><span className="rounded-full bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">{currentSceneQueuedMaterials.length} 条</span></div>
-                <div className="mt-3 space-y-3">{currentSceneQueuedMaterials.length > 0 ? currentSceneQueuedMaterials.map((item) => <MaterialRow key={item.id} item={item} onUpdateTags={onUpdateMaterialTags} onMarkUsed={(materialId) => onUpdateMaterialStatus(materialId, 'used')} onMoveToInbox={onMoveMaterialToInbox} onLinkToRevision={onLinkMaterialToRevision} onConvertToMemory={onConvertMaterialToMemory} onRemove={onRemoveMaterial} />) : <div className="rounded-xl border border-dashed border-[var(--color-border)] px-3 py-3 text-[11px] leading-6 text-[var(--color-ink-faint)]">{currentScene ? '这场还没有待用素材。你可以从选中文本、织带回声或手动记录把片段收进来。' : '先让当前段落绑定一个场景卡，素材池才会围绕这一场开始工作。'}</div>}</div>
-              </div>
+              <SectionShell className="px-5 py-5">
+                <SectionIntro title="当前场景待用素材" detail="把这一场暂时要用的片段先堆在这里，写的时候直接消费，不让素材继续躺在总列表里。" meta={<span className="rounded-full bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-ink-faint)]">{currentSceneQueuedMaterials.length} 条</span>} />
+                <div className="mt-4 space-y-3">{currentSceneQueuedMaterials.length > 0 ? currentSceneQueuedMaterials.map((item) => <MaterialRow key={item.id} item={item} onUpdateTags={onUpdateMaterialTags} onMarkUsed={(materialId) => onUpdateMaterialStatus(materialId, 'used')} onMoveToInbox={onMoveMaterialToInbox} onLinkToRevision={onLinkMaterialToRevision} onConvertToMemory={onConvertMaterialToMemory} onRemove={onRemoveMaterial} />) : <EmptyStateBox>{currentScene ? '这场还没有待用素材。你可以从选中文本、织带回声或手动记录把片段收进来。' : '先让当前段落绑定一个场景卡，素材池才会围绕这一场开始工作。'}</EmptyStateBox>}</div>
+              </SectionShell>
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-4"><p className="text-sm font-medium text-[var(--color-ink)]">修改雷达</p><p className="mt-1 text-xs leading-6 text-[var(--color-ink-light)]">适合先找当前段落的明显问题点。</p><button type="button" onClick={onRunRevisionRadar} className="mt-3 rounded-full border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-ink-light)]">{assistLoading.revision_radar ? '分析中...' : '运行雷达'}</button>{assistResults.revision_radar?.items[0] && <div className="mt-3 rounded-xl bg-[var(--color-surface)] px-3 py-2"><p className="text-xs font-medium text-[var(--color-ink)]">{assistResults.revision_radar.items[0].title}</p><p className="mt-1 text-[11px] leading-6 text-[var(--color-ink-light)]">{assistResults.revision_radar.items[0].detail}</p></div>}</div>

@@ -394,100 +394,118 @@ function buildEntityExplanationUserPrompt(context: string, sourceLabel: string):
   return [
     `模块名称：${sourceLabel}`,
     contextPreview ? `当前用户片段：\n${contextPreview}` : '',
-    '任务：先从当前用户片段里识别 1-2 个明确的实体词或专名（如人名、地名、书名、典故、制度、器物、术语），再选择其中最值得解释的 1 个。',
-    '不要解释整段文本的出处，不要概括整段内容，只解释你识别出的那个实体。',
-    '如果片段里没有明确、值得解释的实体，请输出严格 JSON：{"ribbonText":"","detailText":""}',
-    '如果有可解释实体，请输出严格 JSON，格式如下：',
-    '{"ribbonText":"实体词：不超过24字的简要释义","detailText":"1段完整中文，80-160字，解释该实体是什么、来自哪里、为什么相关"}',
-    '要求：',
-    '- ribbonText 必须是词条型短句，直接点名实体，不要写成整段摘要',
-    '- detailText 只解释该实体，不延伸解释整段剧情',
-    '- 只输出 JSON，不要编号，不要 markdown，不要前后缀',
+    '请按照系统提示完成该模块任务。',
+    '输出格式：',
+    '{"ribbonText":"不超过24字的顶部摘要","detailText":"1段完整中文正文"}',
+    '元规则：',
+    '- ribbonText 适合顶部织带展示，保持简短',
+    '- detailText 只输出正文，不要编号、标题或 markdown',
+    '- 只输出 JSON，不要前后缀',
   ]
     .filter(Boolean)
     .join('\n\n')
 }
 
-function buildTermListUserPrompt(context: string, sourceLabel: string, criteriaText?: string): string {
+function buildTermListUserPrompt(context: string, sourceLabel: string): string {
   const contextPreview = context.trim().slice(0, 420)
   return [
     `模块名称：${sourceLabel}`,
-    criteriaText ? `只提取符合这条要求的词：${criteriaText}` : '',
     contextPreview ? `当前用户片段：\n${contextPreview}` : '',
-    '任务：从当前用户片段中提取 1-5 个真正符合上述要求的词汇或短语。',
-    '不要写成长句，不要改写整段，不要解释出处。',
-    '输出要求：',
-    '- 每行只输出一个词或短语',
-    '- 每项尽量控制在 2-10 个字',
-    '- 允许保守，不确定时宁可少给',
-    '- 如果片段里没有符合要求的词，就输出空字符串',
-    '- 只输出结果列表，不要编号，不要解释，不要前后缀',
-  ]
-    .filter(Boolean)
-    .join('\n\n')
-}
-
-function buildGuidedTermsUserPrompt(context: string, sourceLabel: string, criteriaText?: string): string {
-  const contextPreview = context.trim().slice(0, 420)
-  return [
-    `模块名称：${sourceLabel}`,
-    criteriaText ? `请围绕这条要求给词：${criteriaText}` : '',
-    contextPreview ? `当前用户片段：\n${contextPreview}` : '',
-    '任务：基于当前用户片段，联想 1-5 个与之适配、且明显属于目标领域的专业词汇或短语。',
-    '这些词不必逐字出现在原文里，但必须和当前片段的情境、气氛、动作或身体感受有关。',
-    '不要写成长句，不要解释，不要改写整段，不要输出泛词。',
-    '输出要求：',
+    '请按照系统提示完成该模块任务。',
+    '元规则：',
     '- 每行只输出一个词或短语',
     '- 每项尽量控制在 2-12 个字',
-    '- 宁可少给，也不要给泛词、空词、人物称呼、时间词、地名等非目标领域词汇',
-    '- 如果联想不到合适的专业词汇，就输出空字符串',
     '- 只输出结果列表，不要编号，不要解释，不要前后缀',
   ]
     .filter(Boolean)
     .join('\n\n')
 }
 
-function inferTermListDomain(criteriaText: string): 'medical' | 'generic' {
-  const normalized = criteriaText.toLowerCase()
-  if (/医疗|医学|医药|医生|症状|疾病|病理|检查|治疗|药|诊断|临床/.test(normalized)) {
-    return 'medical'
-  }
-  return 'generic'
+function buildGuidedTermsUserPrompt(context: string, sourceLabel: string): string {
+  const contextPreview = context.trim().slice(0, 420)
+  return [
+    `模块名称：${sourceLabel}`,
+    contextPreview ? `当前用户片段：\n${contextPreview}` : '',
+    '请按照系统提示完成该模块任务。',
+    '元规则：',
+    '- 每行只输出一个词或短语',
+    '- 每项尽量控制在 2-12 个字',
+    '- 只输出结果列表，不要编号，不要解释，不要前后缀',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
 }
 
-function normalizeTermListOutput(rawText: string, criteriaText: string): string {
-  const domain = inferTermListDomain(criteriaText)
+function normalizeTermListOutput(rawText: string): string {
   const lines = rawText
     .split('\n')
     .map((line) => line.replace(/^[\-\d\.\)\s]+/, '').trim())
     .filter(Boolean)
     .slice(0, 8)
 
-  if (domain !== 'medical') {
-    return lines.slice(0, 5).join('\n')
-  }
-
-  const medicalPattern = /痛|疼|炎|瘤|癌|病|症|征|药|疗|诊|检|查|术|针|剂|孕|产|呼吸|胸|腹|头|脑|心|肺|肝|脾|胃|肠|肾|血|压|脉|骨|肌|关节|感染|创伤|康复|发热|咳|眩晕|水肿|心率|血糖|血脂|贫血|过敏/
-  const filtered = lines.filter((line) => medicalPattern.test(line))
-  return filtered.slice(0, 5).join('\n')
+  return lines.slice(0, 5).join('\n')
 }
 
-function normalizeGuidedTermsOutput(rawText: string, criteriaText: string): string {
-  const domain = inferTermListDomain(criteriaText)
+function normalizeGuidedTermsOutput(rawText: string): string {
   const lines = rawText
     .split('\n')
     .map((line) => line.replace(/^[\-\d\.\)\s]+/, '').trim())
     .filter(Boolean)
     .slice(0, 8)
 
-  if (domain !== 'medical') {
-    return lines.slice(0, 5).join('\n')
+  return lines.slice(0, 5).join('\n')
+}
+
+function normalizeModuleOutputText(
+  rawText: string,
+  module: { type: RibbonModuleType; id: string; label?: string },
+): string {
+  if (isTermListModule(module)) {
+    return normalizeTermListOutput(rawText)
+  }
+  if (isGuidedTermsModule(module)) {
+    return normalizeGuidedTermsOutput(rawText)
+  }
+  return rawText
+}
+
+function buildBatchUserPromptForModule(
+  context: string,
+  ragForAi: EchoItem[],
+  module: { type: RibbonModuleType; id: string; prompt?: string; model?: string; label?: string },
+): string {
+  const mode = ribbonTypeToAIMode(module.type)
+  const customOptions = module.type === 'custom' ? getCustomPromptOptions(module.id) : null
+
+  if (isTermListModule(module)) {
+    return buildTermListUserPrompt(
+      context,
+      getModuleDisplayLabel(module.type, module.id, module.label),
+    )
   }
 
-  const medicalPattern = /痛|疼|炎|瘤|癌|病|症|征|药|疗|诊|检|查|术|针|剂|孕|产|呼吸|胸|腹|头|脑|心|肺|肝|脾|胃|肠|肾|血|压|脉|骨|肌|关节|感染|创伤|康复|发热|咳|眩晕|水肿|心率|血糖|血脂|贫血|过敏|焦虑|抑郁|失眠|乏力|麻木|痉挛|缺氧|休克|炎症|外伤|创口|绷带|缝合/
-  const bannedGenericPattern = /母亲|父亲|日历|时刻|时间|日期|果盘|海风|落叶|小鸟|爱奥尼亚|半岛|海面|船票/
-  const filtered = lines.filter((line) => medicalPattern.test(line) && !bannedGenericPattern.test(line))
-  return filtered.slice(0, 5).join('\n')
+  if (isGuidedTermsModule(module)) {
+    return buildGuidedTermsUserPrompt(
+      context,
+      getModuleDisplayLabel(module.type, module.id, module.label),
+    )
+  }
+
+  return buildUserPromptByMode(context, module.type === 'custom' && customOptions?.useRag ? ragForAi : [], mode)
+}
+
+export function canBatchGenerateEchoesForModule(
+  module: { type: RibbonModuleType; id: string; prompt?: string; model?: string; label?: string },
+): boolean {
+  if (!(module.type.startsWith('ai:') || module.type === 'custom')) return false
+  if ((module.model ?? '').trim().length > 0) return false
+  if (module.type.startsWith('ai:')) return true
+
+  const customOptions = getCustomPromptOptions(module.id)
+  if (customOptions.useRag || customOptions.ragFallback) return false
+  if (isParagraphOutputModule(module) || isEntityExplanationModule(module)) return false
+
+  return true
 }
 
 function parseParagraphModuleResult(
@@ -1215,25 +1233,15 @@ export async function generateEchoesForModule(
     userContent = `当前文本：\n${context}\n\n请根据以上文本，直接给出你的回应。`
   } else if (isTermListModule(module)) {
     ragForPrompt = []
-    const criteriaText = [customOptions?.name, customOptions?.description, customOptions?.content]
-      .filter(Boolean)
-      .join(' / ')
-      .slice(0, 220)
     userContent = buildTermListUserPrompt(
       context,
       getModuleDisplayLabel(module.type, module.id, module.label),
-      criteriaText,
     )
   } else if (isGuidedTermsModule(module)) {
     ragForPrompt = []
-    const criteriaText = [customOptions?.name, customOptions?.description, customOptions?.content]
-      .filter(Boolean)
-      .join(' / ')
-      .slice(0, 220)
     userContent = buildGuidedTermsUserPrompt(
       context,
       getModuleDisplayLabel(module.type, module.id, module.label),
-      criteriaText,
     )
   } else if (paragraphOutput && isEntityExplanationModule(module)) {
     ragForPrompt = []
@@ -1402,18 +1410,7 @@ export async function generateEchoesForModule(
     return { items: [], usedRag, error: 'API返回空内容' }
   }
 
-  const normalizedText =
-    isTermListModule(module)
-      ? normalizeTermListOutput(
-          text,
-          [customOptions?.name, customOptions?.description, customOptions?.content].filter(Boolean).join(' / '),
-        )
-      : isGuidedTermsModule(module)
-        ? normalizeGuidedTermsOutput(
-            text,
-            [customOptions?.name, customOptions?.description, customOptions?.content].filter(Boolean).join(' / '),
-          )
-      : text
+  const normalizedText = normalizeModuleOutputText(text, module)
 
   devLog.push('ai', `generateEchoesForModule [${sourceLabel}] response`, {
     moduleId: module.id,
@@ -1456,7 +1453,7 @@ export async function generateBatchEchoesForModules(
   const apiKey = settings.apiKey
   if (!apiKey || modules.length === 0) return { byModuleId: {} }
 
-  const allowedModules = modules.filter((m) => m.type.startsWith('ai:') || m.type === 'custom')
+  const allowedModules = modules.filter((m) => canBatchGenerateEchoesForModule(m))
   if (allowedModules.length === 0) return { byModuleId: {} }
 
   const maxTokens = Math.min(2048, Math.max(512, allowedModules.length * 400))
@@ -1465,12 +1462,8 @@ export async function generateBatchEchoesForModules(
   const moduleSections = allowedModules
     .map((m) => {
       const sourceLabel = getModuleDisplayLabel(m.type, m.id, m.label)
-      const mode = ribbonTypeToAIMode(m.type)
-      const customOptions = m.type === 'custom' ? getCustomPromptOptions(m.id) : null
-      const ragForPrompt = m.type === 'custom' && customOptions?.useRag ? ragForAi : []
-
       const systemPrompt = getSystemPromptForRibbonModule(m.type, m.id, m.prompt)
-      const userPrompt = buildUserPromptByMode(context, ragForPrompt, mode)
+      const userPrompt = buildBatchUserPromptForModule(context, ragForAi, m)
 
       // The model must follow "module-specific system prompt + user prompt" inside this section.
       return `MODULE_ID: ${m.id}
@@ -1509,7 +1502,6 @@ Rules:
         {
           role: 'user',
           content:
-            `Context text:\n${context}\n\n` +
             `You will be given module sections. Each module section includes a module-specific system prompt and a module-specific user prompt.\n` +
             `Follow each module section independently and output results only in the JSON schema.\n\n` +
             moduleSections +
@@ -1564,20 +1556,21 @@ Rules:
     const m = allowedModules[i]
     const arr = (results as Record<string, unknown>)[m.id]
     const lines = Array.isArray(arr) ? arr.filter((x) => typeof x === 'string').map((x) => (x as string).trim()) : []
-    const usable = lines.filter((x) => x.length > 0).slice(0, 5)
+    const rawText = lines.filter((x) => x.length > 0).slice(0, 5).join('\n')
 
     const sourceLabel = getModuleDisplayLabel(m.type, m.id, m.label)
-    byModuleId[m.id] = usable.map((content, idx) => ({
-      id: `ai-batch-${m.type}-${m.id}-${Date.now()}-${idx}`,
-      type: 'lit',
-      content,
-      ribbonText: content,
-      source: sourceLabel,
+    const normalizedText = normalizeModuleOutputText(rawText, m)
+
+    devLog.push('ai', `generateBatchEchoesForModules [${sourceLabel}] response`, {
       moduleId: m.id,
-      moduleLabel: m.label?.trim() || sourceLabel,
-      blockId,
-      createdAt: new Date().toISOString(),
-    }))
+      textLen: rawText.length,
+      normalizedPreview: normalizedText.slice(0, 120) + (normalizedText.length > 120 ? '…' : ''),
+      normalizedEmpty: normalizedText.trim().length === 0,
+    })
+
+    byModuleId[m.id] = normalizedText.trim().length === 0
+      ? []
+      : buildModuleEchoItems(m, sourceLabel, normalizedText, blockId)
   }
 
   return { byModuleId }
