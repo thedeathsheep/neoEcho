@@ -5,24 +5,33 @@
  * Supports multiple knowledge bases with mandatory book search.
  */
 
-import { readFile } from '@tauri-apps/plugin-fs'
 import { open } from '@tauri-apps/plugin-dialog'
+import { readFile } from '@tauri-apps/plugin-fs'
 
-import { createLogger } from '@/lib/logger'
-import { generateId } from '@/lib/utils/crypto'
 import {
+  clearChunks as clearChunksInIdb,
   loadAllChunks as loadAllChunksFromIdb,
   loadChunksForBase as loadChunksForBaseFromIdb,
   saveAllChunks as saveAllChunksToIdb,
-  clearChunks as clearChunksInIdb,
 } from '@/lib/chunk-storage'
-import { parseFile, type ParseResult } from './file-parser.service'
+import { createLogger } from '@/lib/logger'
+import { generateId } from '@/lib/utils/crypto'
+
 import {
   createImageryAtoms,
-  normalizeChunkContentForDedup,
   type ImageryAtom,
+  normalizeChunkContentForDedup,
 } from './chunking.service'
 import { embedBatch } from './embedding.service'
+import {
+  parseFile,
+  type ParseResult,
+  type PdfOcrFailedDetail,
+  type PdfOcrFinishedDetail,
+  type PdfOcrProgressDetail,
+  type PdfOcrStartedDetail,
+} from './file-parser.service'
+import { OcrError } from './ocr.service'
 
 const logger = createLogger('knowledge-base')
 
@@ -35,6 +44,32 @@ const BASES_KEY = 'echo-knowledge-bases'
 const CHUNKS_KEY = 'echo-knowledge-chunks-v2'
 const ACTIVE_BASE_ID_KEY = 'echo-active-knowledge-base-id'
 
+function dispatchKnowledgeImportEvent<T>(eventName: string, detail: T): void {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new CustomEvent(eventName, { detail }))
+}
+
+function getOcrUserMessage(error: OcrError): string {
+  switch (error.code) {
+    case 'OCR_NOT_CONFIGURED':
+      return '这份 PDF 看起来是扫描件，当前还没配置 OCR 模型。请先在设置里填写支持图片识别的 OCR 模型名。'
+    case 'OCR_TIMEOUT':
+      return '扫描件 OCR 超时了，请稍后重试，或换一个响应更快的视觉/OCR 模型。'
+    case 'OCR_UNAUTHORIZED':
+      return 'OCR 配置无效，请检查主模型的 API Key、服务地址，或确认该 OCR 模型可用。'
+    case 'OCR_RATE_LIMITED':
+      return 'OCR 请求过于频繁或额度不足，请稍后再试。'
+    case 'OCR_MODEL_UNSUPPORTED':
+      return '当前 OCR 模型不支持图片识别，请换成支持视觉输入的模型。'
+    case 'OCR_API_ERROR':
+      return `OCR 失败：${error.message || '服务暂时不可用'}`
+    case 'OCR_EMPTY_RESULT':
+      return 'OCR 没有识别到可用文字，请确认这份扫描件是否清晰可读。'
+    default:
+      return '扫描件 OCR 失败，请稍后重试。'
+  }
+}
+
 export interface KnowledgeFile {
   id: string
   fileName: string
@@ -44,12 +79,12 @@ export interface KnowledgeFile {
   totalChunks: number
   totalChars: number
   parseResult?: ParseResult
-  baseId: string  // Added: which knowledge base this file belongs to
+  baseId: string // Added: which knowledge base this file belongs to
 }
 
 export interface KnowledgeChunk extends ImageryAtom {
   fileId: string
-  baseId: string  // Added: which knowledge base this chunk belongs to
+  baseId: string // Added: which knowledge base this chunk belongs to
   importedAt: string
   /** Local embedding vector (from transformers.js) for semantic search */
   embedding?: number[]
@@ -59,11 +94,11 @@ export interface KnowledgeChunk extends ImageryAtom {
 export type MandatoryMaxSlots = 1 | 2 | 3
 
 export interface KnowledgeBase {
-  id: string           // Unique ID for this knowledge base
-  name: string         // Display name
+  id: string // Unique ID for this knowledge base
+  name: string // Display name
   files: KnowledgeFile[]
-  mandatoryBooks: string[]  // File IDs (KnowledgeFile.id) that must be included in search (1-3 books)
-  mandatoryMaxSlots?: MandatoryMaxSlots  // Max slots from mandatory books (default 1)
+  mandatoryBooks: string[] // File IDs (KnowledgeFile.id) that must be included in search (1-3 books)
+  mandatoryMaxSlots?: MandatoryMaxSlots // Max slots from mandatory books (default 1)
   lastUpdated: string
 }
 
@@ -254,10 +289,7 @@ export async function selectFiles(): Promise<string[]> {
 /**
  * Import a single file into a specific knowledge base
  */
-export async function importFile(
-  filePath: string,
-  baseId?: string,
-): Promise<KnowledgeFile | null> {
+export async function importFile(filePath: string, baseId?: string): Promise<KnowledgeFile | null> {
   const targetBaseId = baseId || getActiveBaseId()
   if (!targetBaseId) {
     logger.error('No active knowledge base')
@@ -285,13 +317,23 @@ export async function importFile(
     const fileSize = fileData.length
 
     // Parse file
-    const parseResult = await parseFile(filePath, fileData)
+    const parseResult = await parseFile(filePath, fileData, {
+      onPdfOcrStarted: (detail: PdfOcrStartedDetail) => {
+        dispatchKnowledgeImportEvent('ocr-started', detail)
+      },
+      onPdfOcrProgress: (detail: PdfOcrProgressDetail) => {
+        dispatchKnowledgeImportEvent('ocr-progress', detail)
+      },
+      onPdfOcrFailed: (detail: PdfOcrFailedDetail) => {
+        dispatchKnowledgeImportEvent('ocr-failed', detail)
+      },
+      onPdfOcrFinished: (detail: PdfOcrFinishedDetail) => {
+        dispatchKnowledgeImportEvent('ocr-finished', detail)
+      },
+    })
 
     // No extractable text (e.g. scanned PDF, or empty file)
-    if (
-      !parseResult.chunks?.length ||
-      (parseResult.totalChars ?? 0) === 0
-    ) {
+    if (!parseResult.chunks?.length || (parseResult.totalChars ?? 0) === 0) {
       logger.warn('No text extracted from file', {
         filePath,
         chunks: parseResult.chunks?.length ?? 0,
@@ -310,11 +352,7 @@ export async function importFile(
     const seenContent = new Set<string>()
 
     for (const chunk of parseResult.chunks) {
-      const atoms = createImageryAtoms(
-        parseResult.fileName,
-        chunk.content,
-        chunk.pageNumber,
-      )
+      const atoms = createImageryAtoms(parseResult.fileName, chunk.content, chunk.pageNumber)
 
       for (const atom of atoms) {
         const dedupKey = normalizeChunkContentForDedup(atom.content)
@@ -382,12 +420,16 @@ export async function importFile(
     return knowledgeFile
   } catch (error) {
     const err = error as Error & { code?: string }
+    if (error instanceof OcrError) {
+      throw error
+    }
     if (err?.code === 'NO_TEXT_EXTRACTED') {
       throw err
     }
     const isQuota =
       err.name === 'QuotaExceededError' ||
-      (err.message && (err.message.includes('QuotaExceeded') || err.message.includes('存储空间不足')))
+      (err.message &&
+        (err.message.includes('QuotaExceeded') || err.message.includes('存储空间不足')))
     if (isQuota) {
       const userErr = new Error(
         '存储空间不足，无法保存更多片段。请删除部分已导入文件后再试，或关闭「启用 API 嵌入」改用本地嵌入。',
@@ -403,10 +445,7 @@ export async function importFile(
 /**
  * Import multiple files into current knowledge base
  */
-export async function importFiles(
-  filePaths: string[],
-  baseId?: string,
-): Promise<KnowledgeFile[]> {
+export async function importFiles(filePaths: string[], baseId?: string): Promise<KnowledgeFile[]> {
   const results: KnowledgeFile[] = []
 
   for (const filePath of filePaths) {
@@ -415,6 +454,12 @@ export async function importFiles(
       if (file) results.push(file)
     } catch (e: unknown) {
       const err = e as Error & { code?: string }
+      if (e instanceof OcrError) {
+        if (e.code === 'OCR_EMPTY_RESULT') {
+          throw new Error('OCR 没有识别到可用文字，请确认这份扫描件是否清晰可读。')
+        }
+        throw new Error(getOcrUserMessage(e))
+      }
       if (err?.code === 'NO_TEXT_EXTRACTED') {
         throw new Error(
           '该 PDF 可能为扫描件，无法提取文字；请使用含文字层的 PDF，或稍后支持 OCR 后再试。',
@@ -551,9 +596,7 @@ export function setMandatoryBooks(baseId: string, fileIds: string[]): boolean {
   if (!base) return false
 
   // Validate that all fileIds exist in this base
-  const validFileIds = fileIds.filter((id) =>
-    base.files.some((f) => f.id === id),
-  )
+  const validFileIds = fileIds.filter((id) => base.files.some((f) => f.id === id))
 
   base.mandatoryBooks = validFileIds.slice(0, 3)
   base.lastUpdated = new Date().toISOString()
@@ -574,10 +617,7 @@ export function getMandatoryBooks(baseId: string): string[] {
 /**
  * Set max slots (1-3) that mandatory books can occupy in ribbon results
  */
-export function setMandatoryMaxSlots(
-  baseId: string,
-  slots: MandatoryMaxSlots,
-): boolean {
+export function setMandatoryMaxSlots(baseId: string, slots: MandatoryMaxSlots): boolean {
   const bases = loadAllBases()
   const base = bases.find((b) => b.id === baseId)
   if (!base) return false
@@ -615,9 +655,7 @@ export function getMandatoryFilePaths(baseId: string): string[] {
   const base = getKnowledgeBase(baseId)
   if (!base || !base.mandatoryBooks?.length) return []
 
-  return base.files
-    .filter((f) => base.mandatoryBooks!.includes(f.id))
-    .map((f) => f.filePath)
+  return base.files.filter((f) => base.mandatoryBooks!.includes(f.id)).map((f) => f.filePath)
 }
 
 /**
@@ -634,16 +672,12 @@ export async function getChunksByFiles(
   const base = getKnowledgeBase(targetId)
   if (!base) return []
 
-  const filePaths = base.files
-    .filter((f) => fileIds.includes(f.id))
-    .map((f) => f.filePath)
+  const filePaths = base.files.filter((f) => fileIds.includes(f.id)).map((f) => f.filePath)
 
   if (filePaths.length === 0) return []
 
   const allChunks = await loadAllChunks()
-  return allChunks.filter(
-    (c) => c.baseId === targetId && filePaths.includes(c.fileId),
-  )
+  return allChunks.filter((c) => c.baseId === targetId && filePaths.includes(c.fileId))
 }
 
 /**
@@ -664,9 +698,7 @@ export async function removeFile(fileId: string, baseId?: string): Promise<boole
   const filePath = base.files[fileIndex].filePath
 
   const allChunks = await loadAllChunks()
-  const remainingChunks = allChunks.filter(
-    (c) => !(c.baseId === targetId && c.fileId === filePath),
-  )
+  const remainingChunks = allChunks.filter((c) => !(c.baseId === targetId && c.fileId === filePath))
   await saveAllChunks(remainingChunks)
 
   base.files.splice(fileIndex, 1)

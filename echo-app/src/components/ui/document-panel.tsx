@@ -1,7 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import { useEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 
 import { documentStorage } from '@/lib/document-storage'
@@ -20,19 +20,18 @@ interface DocumentPanelProps {
 
 function formatDate(iso: string): string {
   try {
-    const d = new Date(iso)
+    const date = new Date(iso)
     const now = new Date()
     const sameDay =
-      d.getDate() === now.getDate() &&
-      d.getMonth() === now.getMonth() &&
-      d.getFullYear() === now.getFullYear()
+      date.getDate() === now.getDate() &&
+      date.getMonth() === now.getMonth() &&
+      date.getFullYear() === now.getFullYear()
+
     if (sameDay) {
-      return d.toLocaleTimeString('zh-CN', {
-        hour: '2-digit',
-        minute: '2-digit',
-      })
+      return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
     }
-    return d.toLocaleDateString('zh-CN', {
+
+    return date.toLocaleDateString('zh-CN', {
       month: 'numeric',
       day: 'numeric',
       hour: '2-digit',
@@ -48,21 +47,40 @@ export function DocumentPanel({
   onOpenDocument,
   onNewDocument,
 }: DocumentPanelProps) {
-  const [docs, setDocs] = useState<DocumentMeta[]>([])
   const [isOpen, setIsOpen] = useState(false)
+  const [_listVersion, setListVersion] = useState(0)
+  const rootRef = useRef<HTMLDivElement | null>(null)
 
-  const refreshList = useCallback(() => {
-    setDocs(documentStorage.list())
-  }, [])
+  const docs = documentStorage.list() as DocumentMeta[]
 
   useEffect(() => {
-    refreshList()
-  }, [refreshList, currentDocumentId, isOpen])
+    if (!isOpen) return
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setIsOpen(false)
+      }
+    }
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsOpen(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown, true)
+    document.addEventListener('keydown', handleEscape, true)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown, true)
+      document.removeEventListener('keydown', handleEscape, true)
+    }
+  }, [isOpen])
 
   const currentDoc = docs.find((doc) => doc.id === currentDocumentId) ?? docs[0] ?? null
 
   const handleNew = () => {
     onNewDocument()
+    setListVersion((version) => version + 1)
     setIsOpen(false)
     toast.success('已新建文稿')
   }
@@ -82,10 +100,10 @@ export function DocumentPanel({
       toast.error('至少保留一篇文稿')
       return
     }
-    if (!confirm(`确定删除「${title || '未命名文稿'}」吗？`)) return
+    if (!confirm(`确定删除《${title || '未命名文稿'}》吗？`)) return
 
     if (documentStorage.delete(id)) {
-      refreshList()
+      setListVersion((version) => version + 1)
       if (id === currentDocumentId) {
         const remaining = documentStorage.list()
         if (remaining.length > 0) {
@@ -98,117 +116,101 @@ export function DocumentPanel({
     }
   }
 
-  if (!isOpen) {
-    return (
-      <div className="fixed top-6 left-8 z-[60]">
-        <button
-          type="button"
-          onClick={() => setIsOpen(true)}
-          className="group flex min-w-[212px] items-center justify-between gap-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface)]/92 px-4 py-3 text-left shadow-sm backdrop-blur transition-all hover:border-[var(--color-ink-faint)] hover:bg-[var(--color-paper)]"
-          title="文稿管理"
-        >
-          <div className="min-w-0">
-            <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-ink-faint)]">文稿</div>
-            <div className="mt-1 truncate text-sm font-medium text-[var(--color-ink)]">
-              {currentDoc?.title || '未命名文稿'}
-            </div>
-            <div className="mt-1 text-[11px] text-[var(--color-ink-faint)]">
-              {currentDoc ? `最近编辑 ${formatDate(currentDoc.updatedAt)}` : '打开文稿列表'}
-            </div>
-          </div>
-          <span className="shrink-0 rounded-full border border-[var(--color-border)] bg-[var(--color-paper)] px-2.5 py-1 text-[11px] text-[var(--color-ink-light)] transition-colors group-hover:text-[var(--color-ink)]">
-            {docs.length}
-          </span>
-        </button>
-      </div>
-    )
-  }
-
   return (
-    <AnimatePresence>
-      <motion.div
-        initial={{ opacity: 0, x: -20 }}
-        animate={{ opacity: 1, x: 0 }}
-        exit={{ opacity: 0, x: -20 }}
-        className="fixed top-6 left-8 z-[60] flex max-h-[calc(100vh-3rem)] w-72 flex-col overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]/90 shadow-lg backdrop-blur-xl"
+    <div ref={rootRef} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setIsOpen((open) => !open)}
+        className="flex min-h-[32px] items-center gap-1.5 rounded-full border border-transparent bg-transparent px-1 py-0.5 text-left transition-[border-color,background-color,color] hover:border-[var(--color-border)]/75 hover:bg-[var(--color-ink)]/[0.02]"
+        title="文稿"
       >
-        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
-          <div>
-            <h3 className="text-sm font-medium text-[var(--color-ink)]">文稿</h3>
-            <p className="mt-0.5 text-[11px] text-[var(--color-ink-faint)]">
-              共 {docs.length} 篇，本地自动保存
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setIsOpen(false)}
-            className="text-[var(--color-ink-faint)] transition-colors hover:text-[var(--color-ink)]"
-          >
-            ×
-          </button>
-        </div>
+        <span className="text-[0.74rem] text-[var(--color-ink-faint)]">文稿</span>
+        <span className="text-[0.82rem] text-[var(--color-ink)]">
+          {currentDoc ? `最近编辑 ${formatDate(currentDoc.updatedAt)}` : '打开列表'}
+        </span>
+        <span className="rounded-full bg-[var(--color-ink)]/[0.045] px-2 py-0.5 text-[0.68rem] text-[var(--color-ink-faint)]">
+          {docs.length}
+        </span>
+      </button>
 
-        <div className="border-b border-[var(--color-border)] p-3">
-          <button
-            type="button"
-            onClick={handleNew}
-            className="w-full rounded-lg bg-[var(--color-btn-primary-bg)] px-3 py-2.5 text-sm text-[var(--color-btn-primary-text)] transition-opacity hover:opacity-90"
+      <AnimatePresence>
+        {isOpen ? (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.16 }}
+            className="absolute left-0 top-[calc(100%+8px)] z-50 flex w-[300px] max-h-[calc(100vh-10rem)] flex-col overflow-hidden rounded-[20px] border border-[var(--color-border)]/65 bg-[var(--color-paper)]/98 shadow-[0_10px_26px_rgba(15,23,42,0.06)] backdrop-blur-xl"
           >
-            + 新建文稿
-          </button>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {docs.length === 0 ? (
-            <div className="px-4 py-8 text-center text-sm text-[var(--color-ink-faint)]">
-              暂无文稿
+            <div className="flex items-center justify-between border-b border-[var(--color-border)]/45 px-4 py-3">
+              <div>
+                <h3 className="text-[0.92rem] font-medium text-[var(--color-ink)]">文稿</h3>
+                <p className="mt-0.5 text-[0.76rem] text-[var(--color-ink-faint)]">本地自动保存</p>
+              </div>
+              <button
+                type="button"
+                onClick={handleNew}
+                className="text-[0.8rem] text-[var(--color-ink-light)] transition-colors hover:text-[var(--color-ink)]"
+              >
+                新建
+              </button>
             </div>
-          ) : (
-            <ul className="py-2">
-              {docs.map((doc) => {
-                const isCurrent = doc.id === currentDocumentId
-                return (
-                  <li
-                    key={doc.id}
-                    className={`group flex items-center justify-between gap-2 px-4 py-2.5 ${
-                      isCurrent ? 'bg-[var(--color-ink)]/10' : 'hover:bg-[var(--color-ink)]/10'
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleOpen(doc.id)}
-                      className="min-w-0 flex-1 text-left"
-                    >
-                      <div className="truncate text-sm font-medium text-[var(--color-ink)]">
-                        {doc.title || '未命名'}
-                      </div>
-                      <div className="mt-0.5 text-[10px] text-[var(--color-ink-faint)]">
-                        {formatDate(doc.updatedAt)}
-                      </div>
-                    </button>
-                    <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                      {isCurrent && (
-                        <span className="rounded bg-[var(--color-ink)]/10 px-1.5 py-0.5 text-[10px] text-[var(--color-ink)]">
-                          当前
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => handleDelete(doc.id, doc.title)}
-                        disabled={docs.length <= 1}
-                        className="p-1 text-[var(--color-ink-faint)] disabled:cursor-not-allowed disabled:opacity-30 hover:text-red-500"
-                        title="删除"
-                      >
-                        ×
-                      </button>
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </div>
-      </motion.div>
-    </AnimatePresence>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+              {docs.length === 0 ? (
+                <div className="px-4 py-8 text-center text-[0.88rem] text-[var(--color-ink-faint)]">
+                  暂无文稿
+                </div>
+              ) : (
+                <ul className="space-y-1">
+                  {docs.map((doc) => {
+                    const isCurrent = doc.id === currentDocumentId
+                    return (
+                      <li key={doc.id}>
+                        <div
+                          className={`flex items-center justify-between gap-3 rounded-[18px] px-3 py-2.5 transition-[background-color,opacity] ${
+                            isCurrent
+                              ? 'bg-[var(--color-ink)]/[0.035] opacity-100'
+                              : 'opacity-78 hover:bg-[var(--color-ink)]/[0.02] hover:opacity-100'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => handleOpen(doc.id)}
+                            className="min-w-0 flex-1 border-none bg-transparent text-left"
+                          >
+                            <div className="truncate text-[0.92rem] text-[var(--color-ink)]">
+                              {doc.title || '未命名'}
+                            </div>
+                            <div className="mt-0.5 text-[0.74rem] text-[var(--color-ink-faint)]">
+                              {formatDate(doc.updatedAt)}
+                            </div>
+                          </button>
+                          <div className="flex shrink-0 items-center gap-2">
+                            {isCurrent ? (
+                              <span className="text-[0.72rem] text-[var(--color-accent)]">
+                                当前
+                              </span>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(doc.id, doc.title)}
+                              disabled={docs.length <= 1}
+                              className="text-[0.76rem] text-[var(--color-ink-faint)] transition-colors hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-30"
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </div>
   )
 }

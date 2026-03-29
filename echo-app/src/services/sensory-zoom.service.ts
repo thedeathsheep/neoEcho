@@ -3,10 +3,10 @@
  * Trigger: user selects text and hits button or Alt+Z.
  */
 
+import { devLog } from '@/lib/dev-log'
 import type { Settings } from '@/lib/settings-context'
 import { generateCandidatesByViews } from '@/services/rag.service'
-import type { EchoItem, RagCandidate } from '@/types'
-import { devLog } from '@/lib/dev-log'
+import type { EchoItem } from '@/types'
 
 function chatCompletionsUrl(baseUrl: string): string {
   const base = baseUrl.replace(/\/+$/, '')

@@ -5,7 +5,7 @@ import { now } from '@/lib/utils/time'
 import { searchVectors } from '@/lib/vector-store'
 import type { EchoItem, EchoType, RagCandidate } from '@/types'
 
-import { embed } from './embedding.service'
+import { embed, isEmbeddingTimeoutError } from './embedding.service'
 import {
   getChunksByBase,
   getChunksByFiles,
@@ -216,7 +216,12 @@ async function scoreChunks(
       })
       devLog.push('rag', 'vector score done', { ms: Date.now() - t1, chunks: chunks.length })
     } catch (e) {
-      logger.warn('Vector search skipped', { error: e })
+      const err = e instanceof Error ? e : new Error(String(e))
+      if (isEmbeddingTimeoutError(err)) {
+        logger.info('Vector search fell back to keyword-only', { reason: 'embedding-timeout' })
+      } else {
+        logger.warn('Vector search skipped', { message: err.message })
+      }
     }
   }
 

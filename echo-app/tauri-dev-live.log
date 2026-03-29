@@ -1,0 +1,34 @@
+
+> echo-app@0.1.0 tauri:dev D:\projects\neoEcho\echo-app
+> tauri dev
+
+
+> echo-app@0.1.0 dev:tauri D:\projects\neoEcho\echo-app
+> powershell -NoProfile -ExecutionPolicy Bypass -File scripts/next-dev-for-tauri.ps1
+
+▲ Next.js 16.1.6 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.1.4:3000
+- Environments: .env.development
+
+✓ Starting...
+✓ Ready in 843ms
+ GET / 200 in 522ms (compile: 280ms, render: 242ms)
+ GET / 200 in 53ms (compile: 5ms, render: 48ms)
+✓ Compiled in 677ms
+✓ Compiled in 75ms
+ GET / 200 in 300ms (compile: 231ms, render: 69ms)
+✓ Compiled in 75ms
+✓ Compiled in 62ms
+✓ Compiled in 123ms
+✓ Compiled in 95ms
+✓ Compiled in 89ms
+✓ Compiled in 71ms
+✓ Compiled in 52ms
+ GET / 200 in 358ms (compile: 84ms, render: 274ms)
+✓ Compiled in 73ms
+ GET / 200 in 232ms (compile: 57ms, render: 175ms)
+✓ Compiled in 120ms
+✓ Compiled in 77ms
+✓ Compiled in 47ms
+✓ Compiled in 164ms

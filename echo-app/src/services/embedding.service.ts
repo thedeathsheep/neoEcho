@@ -3,12 +3,12 @@
  * When useEmbeddingApi + baseUrl + apiKey are set, uses API; otherwise local.
  */
 
-import { createLogger } from '@/lib/logger'
 import {
+  type EmbeddingConfig,
   getEmbeddingConfig,
   isEmbeddingApiConfigured,
-  type EmbeddingConfig,
 } from '@/lib/embedding-config'
+import { createLogger } from '@/lib/logger'
 
 const logger = createLogger('embedding')
 
@@ -216,6 +216,15 @@ const EMBED_CACHE_TTL_MS = 60_000
 
 const embedCache = new Map<string, { vec: number[]; ts: number }>()
 
+export function isEmbeddingTimeoutError(error: unknown): boolean {
+  if (error instanceof DOMException) {
+    return error.name === 'TimeoutError' || error.name === 'AbortError'
+  }
+  if (!(error instanceof Error)) return false
+  const message = error.message.toLowerCase()
+  return message.includes('timed out') || message.includes('timeout')
+}
+
 function getCachedEmbed(trimmed: string): number[] | null {
   const key = trimmed.slice(0, 300)
   const entry = embedCache.get(key)
@@ -259,7 +268,11 @@ export async function embed(text: string): Promise<number[]> {
       vec = await embedViaApi(trimmed, config)
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error))
-      logger.error('Embedding API failed', { message: err.message })
+      if (isEmbeddingTimeoutError(err)) {
+        logger.warn('Embedding API timed out', { message: err.message })
+      } else {
+        logger.error('Embedding API failed', { message: err.message })
+      }
       throw err
     }
   } else {
@@ -293,7 +306,11 @@ export async function embedBatch(
       return await embedBatchViaApi(texts, config, onProgress)
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error))
-      logger.error('Embedding API batch failed', { message: err.message })
+      if (isEmbeddingTimeoutError(err)) {
+        logger.warn('Embedding API batch timed out', { message: err.message })
+      } else {
+        logger.error('Embedding API batch failed', { message: err.message })
+      }
       throw err
     }
   }

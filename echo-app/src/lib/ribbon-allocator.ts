@@ -1,4 +1,4 @@
-import type { EchoItem, PlaceholderItem, AllocationMode, RibbonModuleConfig } from '@/types'
+import type { AllocationMode, EchoItem, PlaceholderItem, RibbonModuleConfig } from '@/types'
 
 export interface AllocationResult {
   items: EchoItem[]

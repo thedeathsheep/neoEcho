@@ -1,12 +1,13 @@
 ﻿'use client'
 
 import { useRouter } from 'next/navigation'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
 import { AboutModal } from '@/components/help/about-modal'
 import { CustomPromptManager } from '@/components/ui/custom-prompt-manager'
 import { KnowledgeBaseManager } from '@/components/ui/knowledge-base-manager'
+import { getRibbonRunProfileCopy } from '@/lib/onboarding-content'
 import {
   BUILTIN_RIBBON_MODULES,
   getAmbientCustomPrompts,
@@ -15,7 +16,11 @@ import {
   sanitizeRibbonModules,
   useSettings,
 } from '@/lib/settings-context'
-import { generatePromptFromDescription,getDefaultPromptForModule, validateApiKey } from '@/services/client-ai.service'
+import {
+  generatePromptFromDescription,
+  getDefaultPromptForModule,
+  validateApiKey,
+} from '@/services/client-ai.service'
 import { customPromptService } from '@/services/custom-prompt.service'
 import { validateEmbeddingApi } from '@/services/embedding.service'
 import { knowledgeBaseService } from '@/services/knowledge-base.service'
@@ -31,7 +36,11 @@ const PRESETS = [
 
 const EMBEDDING_PRESETS = [
   { label: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1', model: 'BAAI/bge-m3' },
-  { label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: 'openai/text-embedding-3-small' },
+  {
+    label: 'OpenRouter',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: 'openai/text-embedding-3-small',
+  },
   { label: 'AIHubMix', baseUrl: 'https://aihubmix.com', model: 'text-embedding-3-small' },
 ] as const
 
@@ -46,17 +55,19 @@ function countEnabledAmbientModules(modules: RibbonModuleConfig[]): number {
 
 function buildRibbonModulesForSettings(modules: RibbonModuleConfig[]): RibbonModuleConfig[] {
   const byId = new Map(modules.map((module) => [module.id, module]))
-  const builtin = BUILTIN_RIBBON_MODULES.filter((module) => module.type !== 'quick').map((module) => {
-    const saved = byId.get(module.id)
-    return {
-      ...module,
-      label: saved?.label ?? module.label,
-      enabled: saved?.enabled ?? (module.id === 'rag' || module.id === 'ai:imagery'),
-      pinned: saved?.pinned ?? false,
-      prompt: saved?.prompt,
-      model: saved?.model,
-    }
-  })
+  const builtin = BUILTIN_RIBBON_MODULES.filter((module) => module.type !== 'quick').map(
+    (module) => {
+      const saved = byId.get(module.id)
+      return {
+        ...module,
+        label: saved?.label ?? module.label,
+        enabled: saved?.enabled ?? (module.id === 'rag' || module.id === 'ai:imagery'),
+        pinned: saved?.pinned ?? false,
+        prompt: saved?.prompt,
+        model: saved?.model,
+      }
+    },
+  )
   const custom = getAmbientCustomPrompts().map((prompt) => {
     const saved = byId.get(prompt.id)
     return {
@@ -97,7 +108,13 @@ function RibbonModulesEditor({
   ribbonModules: RibbonModuleConfig[]
   setRibbonModules: React.Dispatch<React.SetStateAction<RibbonModuleConfig[]>>
   onManageCustomPrompts: () => void
-  onEditModulePrompt: (moduleId: string, moduleType: RibbonModuleType, currentPrompt?: string, currentModel?: string, currentLabel?: string) => void
+  onEditModulePrompt: (
+    moduleId: string,
+    moduleType: RibbonModuleType,
+    currentPrompt?: string,
+    currentModel?: string,
+    currentLabel?: string,
+  ) => void
 }) {
   const activeBase = knowledgeBaseService.getActive()
   const ragFixedCount = Math.min(RAG_PINNED_MAX, activeBase?.mandatoryBooks?.length ?? 0)
@@ -129,7 +146,10 @@ function RibbonModulesEditor({
   const isOverRecommended = enabledAmbientCount > RECOMMENDED_ENABLED_AMBIENT_MODULES
   const canEnableMore = enabledAmbientCount < MAX_ENABLED_AMBIENT_MODULES
 
-  const updateModule = (id: string, patch: Partial<Pick<RibbonModuleConfig, 'enabled' | 'pinned'>>) => {
+  const updateModule = (
+    id: string,
+    patch: Partial<Pick<RibbonModuleConfig, 'enabled' | 'pinned'>>,
+  ) => {
     setRibbonModules((prev) => {
       const existing = prev.find((m) => m.id === id)
       const base = existing ?? { id, type: 'rag' as const, label: '' }
@@ -137,8 +157,22 @@ function RibbonModulesEditor({
       if (existing) return prev.map((m) => (m.id === id ? { ...m, ...patch } : m))
       const builtin = BUILTIN_RIBBON_MODULES.find((b) => b.id === id)
       const customP = customPrompts.find((p) => p.id === id)
-      if (builtin) return [...prev, { ...builtin, enabled: next.enabled ?? false, pinned: next.pinned ?? false }]
-      if (customP) return [...prev, { id: customP.id, type: 'custom', label: customP.name, enabled: next.enabled ?? false, pinned: next.pinned ?? false }]
+      if (builtin)
+        return [
+          ...prev,
+          { ...builtin, enabled: next.enabled ?? false, pinned: next.pinned ?? false },
+        ]
+      if (customP)
+        return [
+          ...prev,
+          {
+            id: customP.id,
+            type: 'custom',
+            label: customP.name,
+            enabled: next.enabled ?? false,
+            pinned: next.pinned ?? false,
+          },
+        ]
       return prev
     })
   }
@@ -153,7 +187,9 @@ function RibbonModulesEditor({
       return
     }
     if (mod.type !== 'rag' && !mod.enabled && !canEnableMore) {
-      toast.error(`织带生成模块最多同时启用 ${MAX_ENABLED_AMBIENT_MODULES} 个；再多会明显拖慢刷新并放大超时。`)
+      toast.error(
+        `织带生成模块最多同时启用 ${MAX_ENABLED_AMBIENT_MODULES} 个；再多会明显拖慢刷新并放大超时。`,
+      )
       return
     }
     updateModule(mod.id, { enabled: true })
@@ -173,10 +209,12 @@ function RibbonModulesEditor({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="space-y-1">
           <p className="text-xs text-[var(--color-ink-faint)]">
-            每启用 1 个非共鸣库模块，就会新增 1 个后台生成请求。建议保持在 {RECOMMENDED_ENABLED_AMBIENT_MODULES} 个以内，硬上限 {MAX_ENABLED_AMBIENT_MODULES} 个。
+            每启用 1 个非共鸣库模块，就会新增 1 个后台生成请求。建议保持在{' '}
+            {RECOMMENDED_ENABLED_AMBIENT_MODULES} 个以内，硬上限 {MAX_ENABLED_AMBIENT_MODULES} 个。
           </p>
           <p className="text-xs text-[var(--color-ink-faint)]">
-            固定 {totalPinned}/{MAX_PINNED}，表示该模块有候选时优先显示；详情型自定义模块不会出现在织带里。
+            固定 {totalPinned}/{MAX_PINNED}
+            ，表示该模块有候选时优先显示；详情型自定义模块不会出现在织带里。
           </p>
         </div>
         <div className="flex items-center gap-2 text-xs">
@@ -189,7 +227,9 @@ function RibbonModulesEditor({
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className={`rounded-full px-2 py-1 ${isOverRecommended ? 'bg-amber-500/10 text-amber-600' : 'bg-[var(--color-paper)] text-[var(--color-ink-faint)]'}`}>
+        <span
+          className={`rounded-full px-2 py-1 ${isOverRecommended ? 'bg-amber-500/10 text-amber-600' : 'bg-[var(--color-paper)] text-[var(--color-ink-faint)]'}`}
+        >
           已启用生成模块 {enabledAmbientCount}/{MAX_ENABLED_AMBIENT_MODULES}
         </span>
         <span className="rounded-full bg-[var(--color-paper)] px-2 py-1 text-[var(--color-ink-faint)]">
@@ -201,54 +241,64 @@ function RibbonModulesEditor({
       </div>
       {isOverRecommended && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700">
-          当前勾选已经进入高负载区。刷新会变慢，超时和织带抖动都会明显增加；如果只是日常写作，先保留 2-3 个最常用模块更稳。
+          当前勾选已经进入高负载区。刷新会变慢，超时和织带抖动都会明显增加；如果只是日常写作，先保留
+          2-3 个最常用模块更稳。
         </div>
       )}
       <div className="divide-y divide-[var(--color-border)]/60">
         {displayModules.map((mod) => (
           <div key={mod.id} className="flex items-center gap-3 py-2 group">
-          <input
-            type="checkbox"
-            id={`ribbon-enable-${mod.id}`}
-            checked={mod.enabled}
-            onChange={(e) => setEnabled(mod, e.target.checked)}
-            className="rounded border-[var(--color-border)]"
-          />
-          <label htmlFor={`ribbon-enable-${mod.id}`} className="flex-1 text-sm text-[var(--color-ink)] min-w-0 truncate">
-            {getModuleLabel(mod)}
-          </label>
-          {/* Edit button for AI modules (built-in, custom, and quick) */}
-          {isPinEligible(mod) && (
-            <button
-              onClick={() => {
-                const currentPrompt = mod.type === 'custom' ? (customPromptService.get(mod.id)?.content ?? '') : mod.prompt
-                onEditModulePrompt(mod.id, mod.type, currentPrompt, mod.model, mod.label)
-              }}
-              className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] px-2 py-0.5 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5"
-              title="编辑模块"
-            >
-              编辑
-            </button>
-          )}
-          {mod.type === 'rag' ? (
-            <span className="text-xs text-[var(--color-ink-faint)]">
-              强制检索 {ragFixedCount} 本
-            </span>
-          ) : (
             <input
               type="checkbox"
-              id={`ribbon-pin-${mod.id}`}
-              checked={mod.pinned}
-              disabled={!mod.enabled || (mod.pinned ? false : !canPinMore)}
-              onChange={(e) => setPinned(mod, e.target.checked)}
+              id={`ribbon-enable-${mod.id}`}
+              checked={mod.enabled}
+              onChange={(e) => setEnabled(mod, e.target.checked)}
               className="rounded border-[var(--color-border)]"
             />
-          )}
-          {isPinEligible(mod) && (
-            <label htmlFor={`ribbon-pin-${mod.id}`} className="text-xs text-[var(--color-ink-faint)]">
-              固定
+            <label
+              htmlFor={`ribbon-enable-${mod.id}`}
+              className="flex-1 text-sm text-[var(--color-ink)] min-w-0 truncate"
+            >
+              {getModuleLabel(mod)}
             </label>
-          )}
+            {/* Edit button for AI modules (built-in, custom, and quick) */}
+            {isPinEligible(mod) && (
+              <button
+                onClick={() => {
+                  const currentPrompt =
+                    mod.type === 'custom'
+                      ? (customPromptService.get(mod.id)?.content ?? '')
+                      : mod.prompt
+                  onEditModulePrompt(mod.id, mod.type, currentPrompt, mod.model, mod.label)
+                }}
+                className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] px-2 py-0.5 border border-[var(--color-border)] rounded hover:bg-[var(--color-ink)]/5"
+                title="编辑模块"
+              >
+                编辑
+              </button>
+            )}
+            {mod.type === 'rag' ? (
+              <span className="text-xs text-[var(--color-ink-faint)]">
+                强制检索 {ragFixedCount} 本
+              </span>
+            ) : (
+              <input
+                type="checkbox"
+                id={`ribbon-pin-${mod.id}`}
+                checked={mod.pinned}
+                disabled={!mod.enabled || (mod.pinned ? false : !canPinMore)}
+                onChange={(e) => setPinned(mod, e.target.checked)}
+                className="rounded border-[var(--color-border)]"
+              />
+            )}
+            {isPinEligible(mod) && (
+              <label
+                htmlFor={`ribbon-pin-${mod.id}`}
+                className="text-xs text-[var(--color-ink-faint)]"
+              >
+                固定
+              </label>
+            )}
           </div>
         ))}
       </div>
@@ -276,37 +326,44 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState(settings.apiKey)
   const [model, setModel] = useState(settings.model)
   const [baseUrl, setBaseUrl] = useState(settings.baseUrl)
+  const [ocrModel, setOcrModel] = useState(settings.ocrModel ?? '')
   const [ribbonRunProfile, setRibbonRunProfile] = useState<'balanced' | 'fast' | 'reliable'>(
-    initialRibbonRunProfile
+    initialRibbonRunProfile,
   )
   const [semanticExpansion, setSemanticExpansion] = useState(
     initialRibbonRunProfile === 'fast' ? false : (settings.semanticExpansion ?? false),
   )
-  const [ribbonAiFilter, setRibbonAiFilter] = useState(settings.ribbonAiFilter ?? false)
+  const [ribbonAiFilter] = useState(settings.ribbonAiFilter ?? false)
   const [ragRerankEnabled, setRagRerankEnabled] = useState(
     initialRibbonRunProfile === 'fast' ? false : (settings.ragRerankEnabled ?? false),
   )
   const [sensoryZoomEnabled, setSensoryZoomEnabled] = useState(settings.sensoryZoomEnabled ?? true)
-  const [clicheDetectionEnabled, setClicheDetectionEnabled] = useState(settings.clicheDetectionEnabled ?? false)
+  const [clicheDetectionEnabled, setClicheDetectionEnabled] = useState(
+    settings.clicheDetectionEnabled ?? false,
+  )
   const [ribbonFilterModel, setRibbonFilterModel] = useState(settings.ribbonFilterModel ?? '')
   const [ribbonPauseSeconds, setRibbonPauseSeconds] = useState(settings.ribbonPauseSeconds ?? 2)
   const [ribbonSlotCount, setRibbonSlotCount] = useState<RibbonSlotCount>(
-    (initialRibbonSettings?.slotCount ?? 5) as RibbonSlotCount
+    (initialRibbonSettings?.slotCount ?? 5) as RibbonSlotCount,
   )
   const [ribbonModules, setRibbonModules] = useState<RibbonModuleConfig[]>(initialRibbonModules)
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>(settings.theme ?? 'light')
-  const [fontSize, setFontSize] = useState<'small' | 'medium' | 'large'>(settings.fontSize ?? 'medium')
+  const [fontSize, setFontSize] = useState<'small' | 'medium' | 'large'>(
+    settings.fontSize ?? 'medium',
+  )
   const [useEmbeddingApi, setUseEmbeddingApi] = useState(settings.useEmbeddingApi ?? false)
   const [embeddingBaseUrl, setEmbeddingBaseUrl] = useState(settings.embeddingBaseUrl ?? '')
   const [embeddingApiKey, setEmbeddingApiKey] = useState(settings.embeddingApiKey ?? '')
   const [embeddingModel, setEmbeddingModel] = useState(settings.embeddingModel ?? 'BAAI/bge-m3')
   const [showEmbeddingPresets, setShowEmbeddingPresets] = useState(false)
-  const [embeddingValidationStatus, setEmbeddingValidationStatus] = useState<ValidationStatus>('idle')
+  const [embeddingValidationStatus, setEmbeddingValidationStatus] =
+    useState<ValidationStatus>('idle')
   const [embeddingValidationMsg, setEmbeddingValidationMsg] = useState('')
   const [filterValidationStatus, setFilterValidationStatus] = useState<ValidationStatus>('idle')
   const [filterValidationMsg, setFilterValidationMsg] = useState('')
 
   const isFastProfile = ribbonRunProfile === 'fast'
+  const currentRunProfileCopy = getRibbonRunProfileCopy(ribbonRunProfile)
 
   const [validationStatus, setValidationStatus] = useState<ValidationStatus>('idle')
   const [validationMsg, setValidationMsg] = useState('')
@@ -387,6 +444,7 @@ export default function SettingsPage() {
       apiKey,
       model,
       baseUrl,
+      ocrModel: ocrModel.trim(),
       ribbonRunProfile,
       semanticExpansion: effectiveSemanticExpansion,
       ribbonAiFilter,
@@ -482,7 +540,9 @@ export default function SettingsPage() {
   const hasApiKey = apiKey.trim().length > 0
   const modelCardTitle = model.trim() || '未填写模型名'
   const modelCardMeta = hasApiKey
-    ? (baseUrl.trim() ? baseUrl.replace(/^https?:\/\//, '') : '未填写服务地址')
+    ? baseUrl.trim()
+      ? baseUrl.replace(/^https?:\/\//, '')
+      : '未填写服务地址'
     : '未配置 API Key'
   const enabledAmbientModuleCount = countEnabledAmbientModules(ribbonModules)
   const ambientPromptCount = getAmbientCustomPrompts().length
@@ -492,7 +552,7 @@ export default function SettingsPage() {
       : enabledAmbientModuleCount === 0
         ? '未启用'
         : '正常'
-  const hasUnsavedChanges = useMemo(() => {
+  const hasUnsavedChanges = (() => {
     const savedRibbonModules = buildRibbonModulesForSettings(
       settings.ribbonSettings?.modules?.length
         ? settings.ribbonSettings.modules
@@ -506,6 +566,7 @@ export default function SettingsPage() {
       apiKey,
       model,
       baseUrl,
+      ocrModel: ocrModel.trim(),
       ribbonRunProfile,
       semanticExpansion,
       ribbonAiFilter,
@@ -527,6 +588,7 @@ export default function SettingsPage() {
       apiKey: settings.apiKey,
       model: settings.model,
       baseUrl: settings.baseUrl,
+      ocrModel: settings.ocrModel?.trim() ?? '',
       ribbonRunProfile:
         settings.ribbonRunProfile ??
         (settings.reliableRibbonMode ? 'reliable' : settings.lowLatencyMode ? 'fast' : 'balanced'),
@@ -547,48 +609,7 @@ export default function SettingsPage() {
       embeddingModel: settings.embeddingModel ?? 'BAAI/bge-m3',
     })
     return currentDraft !== savedDraft
-  }, [
-    apiKey,
-    model,
-    baseUrl,
-    ribbonRunProfile,
-    semanticExpansion,
-    ribbonAiFilter,
-    ragRerankEnabled,
-    sensoryZoomEnabled,
-    clicheDetectionEnabled,
-    ribbonFilterModel,
-    ribbonPauseSeconds,
-    ribbonSlotCount,
-    ribbonModules,
-    theme,
-    fontSize,
-    useEmbeddingApi,
-    embeddingBaseUrl,
-    embeddingApiKey,
-    embeddingModel,
-    settings.apiKey,
-    settings.model,
-    settings.baseUrl,
-    settings.semanticExpansion,
-    settings.ribbonAiFilter,
-    settings.ragRerankEnabled,
-    settings.sensoryZoomEnabled,
-    settings.clicheDetectionEnabled,
-    settings.ribbonFilterModel,
-    settings.ribbonPauseSeconds,
-    settings.ribbonSettings?.slotCount,
-    settings.theme,
-    settings.fontSize,
-    settings.useEmbeddingApi,
-    settings.embeddingBaseUrl,
-    settings.embeddingApiKey,
-    settings.embeddingModel,
-    settings.ribbonRunProfile,
-    settings.lowLatencyMode,
-    settings.reliableRibbonMode,
-    settings.ribbonSettings?.modules,
-  ])
+  })()
 
   return (
     <div className="min-h-screen bg-[var(--color-paper)] pb-24">
@@ -642,14 +663,18 @@ export default function SettingsPage() {
           </div>
           <div className="rounded-xl bg-[var(--color-surface)] px-4 py-3">
             <div className="text-xs text-[var(--color-ink-faint)]">织带负载</div>
-            <div className="mt-1 text-sm font-medium text-[var(--color-ink)]">{ribbonLoadLabel}</div>
+            <div className="mt-1 text-sm font-medium text-[var(--color-ink)]">
+              {ribbonLoadLabel}
+            </div>
             <div className="mt-1 text-xs text-[var(--color-ink-faint)]">
-              已启用 {enabledAmbientModuleCount} 个生成模块，运行档为 {ribbonRunProfile}
+              已启用 {enabledAmbientModuleCount} 个生成模块，运行档为 {currentRunProfileCopy.title}
             </div>
           </div>
           <div className="rounded-xl bg-[var(--color-surface)] px-4 py-3">
             <div className="text-xs text-[var(--color-ink-faint)]">自定义模块</div>
-            <div className="mt-1 text-sm font-medium text-[var(--color-ink)]">{ambientPromptCount} 个 ambient 模块</div>
+            <div className="mt-1 text-sm font-medium text-[var(--color-ink)]">
+              {ambientPromptCount} 个 ambient 模块
+            </div>
             <div className="mt-1 text-xs text-[var(--color-ink-faint)]">
               detail 模块只在详情解释中使用，不会进入织带
             </div>
@@ -660,11 +685,9 @@ export default function SettingsPage() {
           <section className="bg-[var(--color-paper-warm)] backdrop-blur rounded-xl border border-[var(--color-border)] p-6">
             <div className="flex items-start justify-between gap-4 mb-4">
               <div>
-                <h2 className="text-lg font-medium text-[var(--color-ink)]">
-                  主模型配置
-                </h2>
+                <h2 className="text-lg font-medium text-[var(--color-ink)]">主模型配置</h2>
                 <p className="text-xs text-[var(--color-ink-faint)] mt-0.5">
-                  用于织带AI模块生成内容（意象/润色/叙事/引用等）
+                  用于织带模块生成内容（意象/润色/叙事/引用等）
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -734,9 +757,7 @@ export default function SettingsPage() {
 
               {/* API Key */}
               <div>
-                <label className="block text-sm text-[var(--color-ink-light)] mb-2">
-                  API Key
-                </label>
+                <label className="block text-sm text-[var(--color-ink-light)] mb-2">API Key</label>
                 <input
                   type="password"
                   value={apiKey}
@@ -751,9 +772,7 @@ export default function SettingsPage() {
 
               {/* Model */}
               <div>
-                <label className="block text-sm text-[var(--color-ink-light)] mb-2">
-                  模型名称
-                </label>
+                <label className="block text-sm text-[var(--color-ink-light)] mb-2">模型名称</label>
                 <input
                   type="text"
                   value={model}
@@ -780,6 +799,23 @@ export default function SettingsPage() {
                 )}
               </div>
 
+              <div>
+                <label className="block text-sm text-[var(--color-ink-light)] mb-2">
+                  OCR 模型名
+                </label>
+                <input
+                  type="text"
+                  value={ocrModel}
+                  onChange={(e) => setOcrModel(e.target.value)}
+                  placeholder="填写支持图片识别的视觉 / OCR 模型"
+                  className="w-full px-4 py-2 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg focus:outline-none focus:border-[var(--color-ink)] transition-colors font-mono text-sm"
+                />
+                <p className="mt-1.5 text-xs leading-relaxed text-[var(--color-ink-faint)]">
+                  只在扫描件 PDF 提取不到文字层时自动触发。它复用上面的 API 服务地址和 API
+                  Key，不需要单独配置第二套 OCR 凭据。
+                </p>
+              </div>
+
               {validationStatus === 'error' && validationMsg && (
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)] px-3 py-2 text-xs">
                   <span className={validationTone.error}>✗ 连接失败</span>
@@ -789,18 +825,17 @@ export default function SettingsPage() {
             </div>
 
             <p className="text-xs text-[var(--color-ink-faint)] mt-4 leading-relaxed">
-              支持所有 OpenAI 兼容格式的 API 服务（DeepSeek、Moonshot、Groq、SiliconFlow 等）。
-              Key 仅保存在本地，不会上传到任何服务器。
+              支持所有 OpenAI 兼容格式的 API 服务（DeepSeek、Moonshot、Groq、SiliconFlow 等）。 Key
+              仅保存在本地，不会上传到任何服务器。
             </p>
           </section>
 
           {/* Embedding API Section */}
           <section className="bg-[var(--color-paper-warm)] backdrop-blur rounded-xl border border-[var(--color-border)] p-6">
-            <h2 className="text-lg font-medium text-[var(--color-ink)] mb-2">
-              嵌入模型配置
-            </h2>
+            <h2 className="text-lg font-medium text-[var(--color-ink)] mb-2">嵌入模型配置</h2>
             <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-              用于织带语义检索（RAG）。使用 API 嵌入可显著提升中文语义检索效果；不配置则使用本地模型（易失败或效果一般）。
+              用于织带语义检索（RAG）。使用 API
+              嵌入可显著提升中文语义检索效果；不配置则使用本地模型（易失败或效果一般）。
             </p>
             <div className="flex items-start gap-3 mb-4">
               <input
@@ -810,7 +845,10 @@ export default function SettingsPage() {
                 onChange={(e) => setUseEmbeddingApi(e.target.checked)}
                 className="mt-1 rounded border-[var(--color-border)]"
               />
-              <label htmlFor="useEmbeddingApi" className="flex-1 cursor-pointer text-sm text-[var(--color-ink)]">
+              <label
+                htmlFor="useEmbeddingApi"
+                className="flex-1 cursor-pointer text-sm text-[var(--color-ink)]"
+              >
                 启用 API 嵌入
               </label>
             </div>
@@ -837,7 +875,9 @@ export default function SettingsPage() {
                               className="w-full text-left px-4 py-2 text-sm hover:bg-[var(--color-ink)]/10"
                             >
                               <span className="font-medium">{p.label}</span>
-                              <span className="text-[var(--color-ink-faint)] ml-2 text-xs">{p.model}</span>
+                              <span className="text-[var(--color-ink-faint)] ml-2 text-xs">
+                                {p.model}
+                              </span>
                             </button>
                           ))}
                         </div>
@@ -856,7 +896,9 @@ export default function SettingsPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm text-[var(--color-ink-light)] mb-2">API Key</label>
+                  <label className="block text-sm text-[var(--color-ink-light)] mb-2">
+                    API Key
+                  </label>
                   <input
                     type="password"
                     value={embeddingApiKey}
@@ -869,7 +911,9 @@ export default function SettingsPage() {
                   />
                 </div>
                 <div>
-                  <label className="block text-sm text-[var(--color-ink-light)] mb-2">嵌入模型名称</label>
+                  <label className="block text-sm text-[var(--color-ink-light)] mb-2">
+                    嵌入模型名称
+                  </label>
                   <input
                     type="text"
                     value={embeddingModel}
@@ -881,14 +925,20 @@ export default function SettingsPage() {
                     className="w-full px-4 py-2 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg focus:outline-none focus:border-[var(--color-ink)] font-mono text-sm"
                   />
                   <p className="text-xs text-[var(--color-ink-faint)] mt-1">
-                    硅基流动: BAAI/bge-m3、Qwen3-Embedding-0.6B 等；OpenRouter / AIHubMix 见各平台文档。
+                    硅基流动: BAAI/bge-m3、Qwen3-Embedding-0.6B 等；OpenRouter / AIHubMix
+                    见各平台文档。
                   </p>
                 </div>
                 <div>
                   <button
                     type="button"
                     onClick={handleValidateEmbedding}
-                    disabled={!embeddingBaseUrl || !embeddingApiKey || !embeddingModel || embeddingValidationStatus === 'loading'}
+                    disabled={
+                      !embeddingBaseUrl ||
+                      !embeddingApiKey ||
+                      !embeddingModel ||
+                      embeddingValidationStatus === 'loading'
+                    }
                     className="px-4 py-2 text-sm border border-[var(--color-border)] rounded-lg hover:bg-[var(--color-ink)]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                   >
                     {embeddingValidationStatus === 'loading' ? (
@@ -916,14 +966,15 @@ export default function SettingsPage() {
 
           {/* Lightweight helper model (same API as main chat, optional different model) */}
           <section className="bg-[var(--color-paper-warm)] backdrop-blur rounded-xl border border-[var(--color-border)] p-6">
-            <h2 className="text-lg font-medium text-[var(--color-ink)] mb-2">
-              轻量辅助模型
-            </h2>
+            <h2 className="text-lg font-medium text-[var(--color-ink)] mb-2">轻量辅助模型</h2>
             <p className="text-xs text-[var(--color-ink-faint)] mb-4">
-              使用主 API（上方对话接口），但允许单独指定一个更快的小模型，供织带里的轻量判断与编辑辅助复用。留空则继续使用主模型。
+              使用主
+              API（上方对话接口），但允许单独指定一个更快的小模型，供织带里的轻量判断与编辑辅助复用。留空则继续使用主模型。
             </p>
             <div>
-              <label className="block text-sm text-[var(--color-ink-light)] mb-2">辅助用小模型</label>
+              <label className="block text-sm text-[var(--color-ink-light)] mb-2">
+                辅助用小模型
+              </label>
               <input
                 type="text"
                 value={ribbonFilterModel}
@@ -935,7 +986,8 @@ export default function SettingsPage() {
                 className="w-full px-4 py-2 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg focus:outline-none focus:border-[var(--color-ink)] font-mono text-sm mb-3"
               />
               <p className="text-xs text-[var(--color-ink-faint)] mb-3">
-                适合填写响应更快、成本更低的模型名，例如 `deepseek-chat`、`qwen-turbo` 一类；后续检索增强重新接回主链路时也会优先复用这里的配置。
+                适合填写响应更快、成本更低的模型名，例如 `deepseek-chat`、`qwen-turbo`
+                一类；后续检索增强重新接回主链路时也会优先复用这里的配置。
               </p>
               <div>
                 <button
@@ -968,9 +1020,7 @@ export default function SettingsPage() {
 
           {/* Ribbon Preferences Section */}
           <section className="bg-[var(--color-paper-warm)] backdrop-blur rounded-xl border border-[var(--color-border)] p-6">
-            <h2 className="text-lg font-medium text-[var(--color-ink)] mb-4">
-              织带偏好
-            </h2>
+            <h2 className="text-lg font-medium text-[var(--color-ink)] mb-4">织带偏好</h2>
 
             <div className="space-y-6">
               <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-3">
@@ -986,7 +1036,10 @@ export default function SettingsPage() {
 
               {/* Ribbon update delay */}
               <div>
-                <label htmlFor="ribbonPauseSeconds" className="block text-sm text-[var(--color-ink-light)] mb-2">
+                <label
+                  htmlFor="ribbonPauseSeconds"
+                  className="block text-sm text-[var(--color-ink-light)] mb-2"
+                >
                   停止输入多少秒后更新织带
                 </label>
                 <div className="flex items-center gap-3">
@@ -1006,15 +1059,14 @@ export default function SettingsPage() {
                   <span className="text-sm text-[var(--color-ink-faint)]">秒（1–10）</span>
                 </div>
                 <p className="text-xs text-[var(--color-ink-faint)] mt-1">
-                  停笔后经过该秒数即触发织带检索与更新。若感觉更新太频繁可调大（如 3–4 秒），若希望更快可调小。
+                  停笔后经过该秒数即触发织带检索与更新。若感觉更新太频繁可调大（如 3–4
+                  秒），若希望更快可调小。
                 </p>
               </div>
 
               {/* Ribbon slot count */}
               <div>
-                <label className="block text-sm text-[var(--color-ink-light)] mb-2">
-                  织带格数
-                </label>
+                <label className="block text-sm text-[var(--color-ink-light)] mb-2">织带格数</label>
                 <div className="flex gap-2">
                   {([5, 6, 7, 8] as const).map((n) => (
                     <button
@@ -1073,7 +1125,13 @@ export default function SettingsPage() {
                   ribbonModules={ribbonModules}
                   setRibbonModules={setRibbonModules}
                   onManageCustomPrompts={() => setShowPromptManager(true)}
-                  onEditModulePrompt={(moduleId, moduleType, currentPrompt, currentModel, currentLabel) => {
+                  onEditModulePrompt={(
+                    moduleId,
+                    moduleType,
+                    currentPrompt,
+                    currentModel,
+                    currentLabel,
+                  ) => {
                     setEditingModuleId(moduleId)
                     setEditingModuleType(moduleType)
                     setEditingModulePrompt(currentPrompt ?? '')
@@ -1082,8 +1140,13 @@ export default function SettingsPage() {
                   }}
                 />
                 <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-[var(--color-ink-faint)]">
-                  <span>每多勾选 1 个非共鸣库模块，就会多出 1 个后台生成请求；详情型自定义模块不会进入这里。</span>
-                  <span>固定现在是最直接的展示优先级控制，不会让该模块跳过生成或超时；新建和编辑自定义模块都统一放在「自定义模块」里。</span>
+                  <span>
+                    每多勾选 1 个非共鸣库模块，就会多出 1
+                    个后台生成请求；详情型自定义模块不会进入这里。
+                  </span>
+                  <span>
+                    固定现在是最直接的展示优先级控制，不会让该模块跳过生成或超时；新建和编辑自定义模块都统一放在「自定义模块」里。
+                  </span>
                   <button
                     onClick={() => setShowKbManager(true)}
                     className="hover:text-[var(--color-ink)] underline underline-offset-2 transition-colors"
@@ -1104,36 +1167,35 @@ export default function SettingsPage() {
                   </span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  {[
-                    { value: 'balanced' as const, title: '均衡', desc: '日常使用，按开关生效' },
-                    { value: 'fast' as const, title: '低延迟', desc: '速度优先（自动关闭部分增强）' },
-                    { value: 'reliable' as const, title: '可靠（调试）', desc: '稳定优先（更长超时 + 可见占位）' },
-                  ].map((opt) => (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      onClick={() => applyRibbonRunProfile(opt.value)}
-                      className={`text-left px-3 py-2 border rounded-lg transition-colors ${
-                        ribbonRunProfile === opt.value
-                          ? 'border-[var(--color-ink)] bg-[var(--color-ink)]/10 text-[var(--color-ink)]'
-                          : 'border-[var(--color-border)] hover:border-[var(--color-ink-light)] text-[var(--color-ink)]'
-                      }`}
-                    >
-                      <div className="text-sm font-medium">{opt.title}</div>
-                      <div className="text-xs text-[var(--color-ink-faint)] mt-0.5 leading-relaxed">
-                        {opt.desc}
-                      </div>
-                    </button>
-                  ))}
+                  {(['balanced', 'fast', 'reliable'] as const).map((value) => {
+                    const copy = getRibbonRunProfileCopy(value)
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => applyRibbonRunProfile(value)}
+                        className={`text-left px-3 py-2 border rounded-lg transition-colors ${
+                          ribbonRunProfile === value
+                            ? 'border-[var(--color-ink)] bg-[var(--color-ink)]/10 text-[var(--color-ink)]'
+                            : 'border-[var(--color-border)] hover:border-[var(--color-ink-light)] text-[var(--color-ink)]'
+                        }`}
+                      >
+                        <div className="text-sm font-medium">{copy.title}</div>
+                        <div className="text-xs text-[var(--color-ink-faint)] mt-0.5 leading-relaxed">
+                          {copy.description}
+                        </div>
+                      </button>
+                    )
+                  })}
                 </div>
                 {ribbonRunProfile === 'fast' && (
                   <p className="text-xs text-[var(--color-ink-faint)] leading-relaxed">
-                    已启用低延迟：会更早放弃慢模块，并跳过空结果的二次补打，优先尽快给出首批可见结果。
+                    {getRibbonRunProfileCopy('fast').detail}
                   </p>
                 )}
                 {ribbonRunProfile === 'reliable' && (
                   <p className="text-xs text-[var(--color-ink-faint)] leading-relaxed">
-                    可靠（调试）档会优先确保你能看到产出：显示“生成中”占位卡、使用更长超时、并避免因探测失败而静默跳过模块。
+                    {getRibbonRunProfileCopy('reliable').detail}
                   </p>
                 )}
                 <div className="rounded-lg border border-[var(--color-border)]/70 bg-[var(--color-surface)] px-3 py-2">
@@ -1155,14 +1217,14 @@ export default function SettingsPage() {
               <div className="rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-paper)] px-4 py-3">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <p className="text-sm font-medium text-[var(--color-ink)]">检索增强（暂未接入当前织带刷新链路）</p>
+                    <p className="text-sm font-medium text-[var(--color-ink)]">检索增强</p>
                     <p className="mt-1 text-xs leading-relaxed text-[var(--color-ink-faint)]">
-                      之前这里的「智能扩展查询词」「织带结果经 AI 过滤」「RAG 重排」容易让人误以为正在影响当前刷新。
-                      这三个选项已从主设置面收起，等重新接回主链路后再恢复可调。
+                      当前织带主链路已内建结果过滤，用来清掉低价值片段，不再作为用户开关暴露。
+                      「智能扩展查询词」与「RAG 重排」仍保留为预留能力，但暂未回到当前刷新链路。
                     </p>
                   </div>
                   <span className="rounded-full bg-[var(--color-paper-warm)] px-2 py-1 text-xs text-[var(--color-ink-faint)]">
-                    预留能力
+                    过滤已接入
                   </span>
                 </div>
               </div>
@@ -1192,7 +1254,8 @@ export default function SettingsPage() {
                         </span>
                       </span>
                       <span className="block text-xs text-[var(--color-ink-faint)] mt-1.5 leading-relaxed">
-                        选中模糊感官句后点「感官放大」或 Alt+Z，从共鸣库涌现触觉、听觉、视觉等微观细节。
+                        选中模糊感官句后点「感官放大」或
+                        Alt+Z，从共鸣库涌现触觉、听觉、视觉等微观细节。
                       </span>
                     </label>
                   </div>
@@ -1244,14 +1307,10 @@ export default function SettingsPage() {
 
           {/* Appearance / 界面偏好 */}
           <section className="bg-[var(--color-paper-warm)] backdrop-blur rounded-xl border border-[var(--color-border)] p-6">
-            <h2 className="text-lg font-medium text-[var(--color-ink)] mb-4">
-              界面偏好
-            </h2>
+            <h2 className="text-lg font-medium text-[var(--color-ink)] mb-4">界面偏好</h2>
             <div className="space-y-6">
               <div>
-                <label className="block text-sm text-[var(--color-ink-light)] mb-2">
-                  主题
-                </label>
+                <label className="block text-sm text-[var(--color-ink-light)] mb-2">主题</label>
                 <div className="flex gap-2 flex-wrap">
                   {[
                     { value: 'light' as const, label: '浅色' },
@@ -1277,9 +1336,7 @@ export default function SettingsPage() {
                 </p>
               </div>
               <div>
-                <label className="block text-sm text-[var(--color-ink-light)] mb-2">
-                  字号
-                </label>
+                <label className="block text-sm text-[var(--color-ink-light)] mb-2">字号</label>
                 <div className="flex gap-2 flex-wrap">
                   {[
                     { value: 'small' as const, label: '小' },
@@ -1303,21 +1360,14 @@ export default function SettingsPage() {
               </div>
             </div>
           </section>
-
         </div>
       </div>
 
       {/* Knowledge Base Manager Modal */}
-      <KnowledgeBaseManager
-        isOpen={showKbManager}
-        onClose={() => setShowKbManager(false)}
-      />
+      <KnowledgeBaseManager isOpen={showKbManager} onClose={() => setShowKbManager(false)} />
 
       {/* Custom Prompt Manager Modal */}
-      <CustomPromptManager
-        isOpen={showPromptManager}
-        onClose={() => setShowPromptManager(false)}
-      />
+      <CustomPromptManager isOpen={showPromptManager} onClose={() => setShowPromptManager(false)} />
 
       {/* Module Prompt Edit Modal */}
       {editingModuleId && (
@@ -1327,7 +1377,11 @@ export default function SettingsPage() {
           onClose={() => setEditingModuleId(null)}
           moduleId={editingModuleId}
           moduleType={editingModuleType}
-          moduleLabel={ribbonModules.find(m => m.id === editingModuleId)?.label ?? BUILTIN_RIBBON_MODULES.find(m => m.id === editingModuleId)?.label ?? '自定义模块'}
+          moduleLabel={
+            ribbonModules.find((m) => m.id === editingModuleId)?.label ??
+            BUILTIN_RIBBON_MODULES.find((m) => m.id === editingModuleId)?.label ??
+            '自定义模块'
+          }
           currentPrompt={editingModulePrompt}
           currentModel={editingModuleModel}
           currentLabel={editingModuleLabel}
@@ -1340,12 +1394,27 @@ export default function SettingsPage() {
                 ragFallback: customOptions?.ragFallback,
               })
             }
-            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt: editingModuleType === 'custom' ? undefined : prompt, model, label: label || m.label } : m))
+            setRibbonModules((prev) =>
+              prev.map((m) =>
+                m.id === editingModuleId
+                  ? {
+                      ...m,
+                      prompt: editingModuleType === 'custom' ? undefined : prompt,
+                      model,
+                      label: label || m.label,
+                    }
+                  : m,
+              ),
+            )
             setEditingModuleId(null)
             toast.success('模块配置已保存')
           }}
           onReset={() => {
-            setRibbonModules(prev => prev.map(m => m.id === editingModuleId ? { ...m, prompt: undefined, model: undefined } : m))
+            setRibbonModules((prev) =>
+              prev.map((m) =>
+                m.id === editingModuleId ? { ...m, prompt: undefined, model: undefined } : m,
+              ),
+            )
             setEditingModuleId(null)
             toast.success('已恢复预置配置')
           }}
@@ -1353,10 +1422,7 @@ export default function SettingsPage() {
       )}
 
       {/* About / Help Modal */}
-      <AboutModal
-        isOpen={showAbout}
-        onClose={() => setShowAbout(false)}
-      />
+      <AboutModal isOpen={showAbout} onClose={() => setShowAbout(false)} />
     </div>
   )
 }
@@ -1371,7 +1437,12 @@ interface ModulePromptEditModalProps {
   currentPrompt: string
   currentModel?: string
   currentLabel?: string
-  onSave: (prompt: string, model?: string, label?: string, customOptions?: { useRag?: boolean; ragFallback?: boolean }) => void
+  onSave: (
+    prompt: string,
+    model?: string,
+    label?: string,
+    customOptions?: { useRag?: boolean; ragFallback?: boolean },
+  ) => void
   onReset: () => void
 }
 
@@ -1430,7 +1501,12 @@ function ModulePromptEditModal({
               </p>
             )}
           </div>
-          <button onClick={onClose} className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]">✕</button>
+          <button
+            onClick={onClose}
+            className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]"
+          >
+            ✕
+          </button>
         </div>
         <div className="p-4 space-y-4 max-h-[60vh] overflow-y-auto">
           {/* Module name editing */}
@@ -1458,9 +1534,11 @@ function ModulePromptEditModal({
             </p>
           </div>
 
-          {/* AI Generate from description */}
+          {/* Generate from description */}
           <div>
-            <label className="block text-sm text-[var(--color-ink-light)] mb-1">提示词描述（可选，AI生成）</label>
+            <label className="block text-sm text-[var(--color-ink-light)] mb-1">
+              提示词描述（可选，辅助生成）
+            </label>
             <div className="flex gap-2">
               <input
                 type="text"
@@ -1474,7 +1552,7 @@ function ModulePromptEditModal({
                 disabled={!description.trim() || !settings.apiKey || isGenerating}
                 className="px-3 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5 disabled:opacity-40"
               >
-                {isGenerating ? '生成中...' : 'AI生成'}
+                {isGenerating ? '生成中...' : '辅助生成'}
               </button>
             </div>
           </div>
@@ -1499,7 +1577,9 @@ function ModulePromptEditModal({
                   onChange={(e) => setRagFallback(e.target.checked)}
                   className="rounded border-[var(--color-border)]"
                 />
-                <span className="text-sm text-[var(--color-ink)]">RAG 失败时自动降级为仅用户上下文</span>
+                <span className="text-sm text-[var(--color-ink)]">
+                  RAG 失败时自动降级为仅用户上下文
+                </span>
               </label>
               <p className="text-xs text-[var(--color-ink-faint)]">
                 开启后，自定义模块可结合知识库内容生成；失败时自动降级。
@@ -1509,7 +1589,9 @@ function ModulePromptEditModal({
 
           {/* Model selection */}
           <div>
-            <label className="block text-sm text-[var(--color-ink-light)] mb-1">使用模型（可选）</label>
+            <label className="block text-sm text-[var(--color-ink-light)] mb-1">
+              使用模型（可选）
+            </label>
             <div className="flex items-center gap-2">
               <input
                 type="text"
@@ -1549,14 +1631,23 @@ function ModulePromptEditModal({
             </div>
             <textarea
               value={prompt}
-              onChange={(e) => { setPrompt(e.target.value); setShowDefault(false); }}
-              placeholder={defaultPrompt ? "输入该模块的提示词；留空则沿用当前预置内容..." : "输入该模块的提示词..."}
+              onChange={(e) => {
+                setPrompt(e.target.value)
+                setShowDefault(false)
+              }}
+              placeholder={
+                defaultPrompt
+                  ? '输入该模块的提示词；留空则沿用当前预置内容...'
+                  : '输入该模块的提示词...'
+              }
               className="w-full h-48 px-3 py-2 bg-[var(--color-paper)] border border-[var(--color-border)] rounded-lg text-sm resize-none focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)]"
             />
             {showDefault && defaultPrompt && (
               <div className="mt-2 p-3 bg-[var(--color-paper-warm)] rounded-lg border border-[var(--color-border)]">
                 <p className="text-xs text-[var(--color-ink-faint)] mb-1">预置提示词：</p>
-                <pre className="text-xs text-[var(--color-ink)] whitespace-pre-wrap">{defaultPrompt}</pre>
+                <pre className="text-xs text-[var(--color-ink)] whitespace-pre-wrap">
+                  {defaultPrompt}
+                </pre>
               </div>
             )}
           </div>
@@ -1564,7 +1655,12 @@ function ModulePromptEditModal({
         <div className="flex justify-between px-4 py-3 border-t border-[var(--color-border)]">
           {defaultPrompt ? (
             <button
-              onClick={() => { setPrompt(''); setModel(''); setLabel(''); onReset(); }}
+              onClick={() => {
+                setPrompt('')
+                setModel('')
+                setLabel('')
+                onReset()
+              }}
               disabled={!currentPrompt && !currentModel && !currentLabel}
               className="px-4 py-2 text-sm text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] disabled:opacity-30"
             >
@@ -1574,14 +1670,21 @@ function ModulePromptEditModal({
             <div />
           )}
           <div className="flex gap-2">
-            <button onClick={onClose} className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5">取消</button>
             <button
-              onClick={() => onSave(
-                prompt.trim(),
-                model.trim() || undefined,
-                label.trim() || undefined,
-                moduleType === 'custom' ? { useRag, ragFallback } : undefined
-              )}
+              onClick={onClose}
+              className="px-4 py-2 border border-[var(--color-border)] rounded-lg text-sm hover:bg-[var(--color-ink)]/5"
+            >
+              取消
+            </button>
+            <button
+              onClick={() =>
+                onSave(
+                  prompt.trim(),
+                  model.trim() || undefined,
+                  label.trim() || undefined,
+                  moduleType === 'custom' ? { useRag, ragFallback } : undefined,
+                )
+              }
               className="px-4 py-2 bg-[var(--color-accent)] text-white rounded-lg text-sm hover:opacity-90"
             >
               保存
@@ -1592,4 +1695,3 @@ function ModulePromptEditModal({
     </div>
   )
 }
-

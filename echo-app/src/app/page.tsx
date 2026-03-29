@@ -12,16 +12,14 @@ import { toast } from 'sonner'
 
 import { EchoEditor, type EchoEditorHandle } from '@/components/editor/echo-editor'
 import { AmbientRibbon } from '@/components/ribbon/ambient-ribbon'
-import { RibbonDetailPanel } from '@/components/ribbon/ribbon-detail-panel'
-import { DevPanel } from '@/components/ui/dev-panel'
 import { DocumentPanel } from '@/components/ui/document-panel'
 import { KnowledgePanel } from '@/components/ui/knowledge-panel'
-import { type TabKey,WritingAssistantPanel } from '@/components/ui/writing-assistant-panel'
 import { useHeartbeat } from '@/hooks/use-heartbeat'
-import { type ClicheMatch,detectCliches } from '@/lib/cliche-detector'
+import { type ClicheMatch, detectCliches } from '@/lib/cliche-detector'
 import { devLog } from '@/lib/dev-log'
 import { documentStorage } from '@/lib/document-storage'
 import { flowHistory } from '@/lib/flow-history'
+import { buildBuiltinGuideDocument } from '@/lib/onboarding-content'
 import { BUILTIN_RIBBON_MODULES, sanitizeRibbonModules, useSettings } from '@/lib/settings-context'
 import { generateId } from '@/lib/utils/crypto'
 import { debounce } from '@/lib/utils/time'
@@ -29,20 +27,27 @@ import { writingWorkspaceStorage } from '@/lib/writing-workspace-storage'
 import { adoptionStore } from '@/services/adoption-store'
 import {
   canBatchGenerateEchoesForModule,
-  generateCharacterConsistency,
+  type ClicheReviewResult,
+  filterRibbonCandidates,
   generateBatchEchoesForModules,
+  generateCharacterConsistency,
   generateEchoesForModule,
   generateImitationDrill,
   generatePlotProgression,
   generateRevisionRadar,
   generateSceneMemoryMap,
   getModuleDisplayLabel,
+  reviewParagraphForCliche,
 } from '@/services/client-ai.service'
 import { customPromptService } from '@/services/custom-prompt.service'
-import { getChunksByBase, getKnowledgeStats, type KnowledgeBase,knowledgeBaseService } from '@/services/knowledge-base.service'
-import { generateCandidatesByViews, type MandatoryMaxSlots,ragService } from '@/services/rag.service'
+import {
+  getChunksByBase,
+  getKnowledgeStats,
+  type KnowledgeBase,
+  knowledgeBaseService,
+} from '@/services/knowledge-base.service'
+import { type MandatoryMaxSlots, ragService } from '@/services/rag.service'
 import { ribbonEngine } from '@/services/ribbon-engine.service'
-import { expandSensoryZoom } from '@/services/sensory-zoom.service'
 import type {
   CharacterWatchStatus,
   Document,
@@ -61,6 +66,8 @@ import type {
   WritingProfileSummary,
   WritingWorkspaceData,
 } from '@/types'
+
+import { type ContextPanelState, RibbonDetailPanel } from '../components/ribbon/ribbon-detail-panel'
 
 const AUTO_SAVE_MS = 2000
 const ERROR_THROTTLE_MS = 60_000
@@ -99,22 +106,6 @@ function revisionPriorityFromSeverity(
   return 'soon'
 }
 
-function debugIngest(hypothesisId: string, location: string, message: string, data: Record<string, unknown>) {
-  fetch('http://127.0.0.1:7776/ingest/bd75bf12-cc2c-45c2-9d32-c1c193905a25', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '626617' },
-    body: JSON.stringify({
-      sessionId: '626617',
-      runId: 'diag',
-      hypothesisId,
-      location,
-      message,
-      data,
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {})
-}
-
 export type AiStatus = 'idle' | 'unconfigured' | 'loading' | 'connected' | 'error'
 
 function isAiLikeSource(source?: string): boolean {
@@ -132,14 +123,22 @@ function filterEchoesForKnowledgeBase(items: EchoItem[], base: KnowledgeBase | n
   }
   const allowedSources = new Set(base.files.map((file) => file.fileName))
   return items.filter(
-    (item) => isGeneratedRibbonModule(item) || isAiLikeSource(item.source) || allowedSources.has(item.source ?? ''),
+    (item) =>
+      isGeneratedRibbonModule(item) ||
+      isAiLikeSource(item.source) ||
+      allowedSources.has(item.source ?? ''),
   )
 }
 
-function createRibbonEchoVisibilityMatcher(base: KnowledgeBase | null, modules: RibbonModuleConfig[]) {
+function createRibbonEchoVisibilityMatcher(
+  base: KnowledgeBase | null,
+  modules: RibbonModuleConfig[],
+) {
   const enabled = modules.filter((entry) => entry.enabled)
   const ragEnabled = enabled.some((entry) => entry.type === 'rag')
-  const allowedModuleIds = new Set(enabled.filter((entry) => entry.type !== 'rag').map((entry) => entry.id))
+  const allowedModuleIds = new Set(
+    enabled.filter((entry) => entry.type !== 'rag').map((entry) => entry.id),
+  )
   const sourceToModule = new Map<string, { id: string; label: string }>()
   const allowedKnowledgeSources = new Set(base?.files.map((file) => file.fileName) ?? [])
 
@@ -149,7 +148,11 @@ function createRibbonEchoVisibilityMatcher(base: KnowledgeBase | null, modules: 
     sourceToModule.set(displayLabel, { id: entry.id, label: displayLabel })
     if (entry.label?.trim()) {
       sourceToModule.set(entry.label.trim(), { id: entry.id, label: entry.label.trim() })
-      sourceToModule.set(`闁煎浜滈悾鐐▕?${entry.label.trim()}`, { id: entry.id, label: entry.label.trim() })
+      sourceToModule.set(`AI ${entry.label.trim()}`, { id: entry.id, label: entry.label.trim() })
+      sourceToModule.set(`闁煎浜滈悾鐐▕?${entry.label.trim()}`, {
+        id: entry.id,
+        label: entry.label.trim(),
+      })
     }
     if (entry.type === 'custom') {
       const promptName = customPromptService.get(entry.id)?.name?.trim()
@@ -165,7 +168,9 @@ function createRibbonEchoVisibilityMatcher(base: KnowledgeBase | null, modules: 
       if (item.moduleId === 'rag') {
         const source = (item.source ?? '').trim()
         if (!base) return ragEnabled ? item : null
-        return ragEnabled && (isAiLikeSource(source) || allowedKnowledgeSources.has(source)) ? item : null
+        return ragEnabled && (isAiLikeSource(source) || allowedKnowledgeSources.has(source))
+          ? item
+          : null
       }
       return allowedModuleIds.has(item.moduleId) ? item : null
     }
@@ -263,7 +268,9 @@ function sortRibbonModulesForExecution(modules: RibbonModuleConfig[]): RibbonMod
 
 function pickReferenceEcho(items: EchoItem[]): EchoItem | null {
   return (
-    items.find((item) => (item.originalText ?? '').trim().length > 0 && !isAiLikeSource(item.source)) ??
+    items.find(
+      (item) => (item.originalText ?? '').trim().length > 0 && !isAiLikeSource(item.source),
+    ) ??
     items.find((item) => (item.originalText ?? item.content ?? '').trim().length > 0) ??
     null
   )
@@ -291,10 +298,7 @@ function normalizeStoredRibbonSlots(
   })
 }
 
-function diffRenderedRibbonSlots(
-  previous: Array<EchoItem | null>,
-  next: Array<EchoItem | null>,
-) {
+function diffRenderedRibbonSlots(previous: Array<EchoItem | null>, next: Array<EchoItem | null>) {
   const max = Math.max(previous.length, next.length)
   let changed = 0
   for (let index = 0; index < max; index += 1) {
@@ -303,19 +307,27 @@ function diffRenderedRibbonSlots(
   return changed
 }
 
+function escapeNodeIdSelector(blockId: string): string {
+  return blockId.replace(/["\\]/g, '\\$&')
+}
+
+function debugCliche(
+  tag: 'cliche-ui' | 'cliche-detect',
+  message: string,
+  payload?: Record<string, unknown>,
+) {
+  devLog.push(tag, message, payload)
+}
+
 function readStoredHomeUiState(slotCount: number): {
   documentId: string | null
   ribbonSlots: Array<EchoItem | null> | null
-  writingPanelOpen: boolean
-  writingPanelTab: TabKey
   selectedRibbonEcho: EchoItem | null
 } {
   if (typeof window === 'undefined') {
     return {
       documentId: null,
       ribbonSlots: null,
-      writingPanelOpen: true,
-      writingPanelTab: 'today',
       selectedRibbonEcho: null,
     }
   }
@@ -326,16 +338,12 @@ function readStoredHomeUiState(slotCount: number): {
       return {
         documentId: null,
         ribbonSlots: null,
-        writingPanelOpen: true,
-        writingPanelTab: 'today',
         selectedRibbonEcho: null,
       }
     }
 
     const parsedUi = JSON.parse(savedHomeUi) as {
       documentId?: string
-      writingPanelOpen?: boolean
-      writingPanelTab?: TabKey
       selectedRibbonEchoId?: string | null
       ribbonSlots?: unknown
     }
@@ -346,113 +354,69 @@ function readStoredHomeUiState(slotCount: number): {
     return {
       documentId: parsedUi.documentId ?? null,
       ribbonSlots,
-      writingPanelOpen: parsedUi.writingPanelOpen ?? true,
-      writingPanelTab: parsedUi.writingPanelTab ?? 'today',
       selectedRibbonEcho,
     }
   } catch {
     return {
       documentId: null,
       ribbonSlots: null,
-      writingPanelOpen: true,
-      writingPanelTab: 'today',
       selectedRibbonEcho: null,
     }
   }
-}
-
-function FloatingResultPanel({
-  title,
-  subtitle,
-  loading = false,
-  emptyText,
-  items,
-  onClose,
-}: {
-  title: string
-  subtitle: string
-  loading?: boolean
-  emptyText: string
-  items: Array<{ id: string; content: string; onClick: () => void }>
-  onClose: () => void
-}) {
-  return (
-    <div className="fixed left-6 top-1/2 z-50 w-[340px] max-w-sm -translate-y-1/2 rounded-[24px] border border-[var(--color-border)] bg-[var(--color-surface)]/96 p-4 shadow-[0_24px_60px_rgba(15,23,42,0.18)] backdrop-blur-xl">
-      <div className="flex items-start justify-between gap-3 border-b border-[var(--color-border)] pb-3">
-        <div className="min-w-0">
-          <p className="text-[10px] uppercase tracking-[0.18em] text-[var(--color-ink-faint)]">编辑辅助</p>
-          <h3 className="mt-1 text-sm font-medium text-[var(--color-ink)]">{title}</h3>
-          <p className="mt-1 text-[11px] leading-5 text-[var(--color-ink-faint)]">{subtitle}</p>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="rounded-full p-1 text-[var(--color-ink-faint)] transition-colors hover:bg-[var(--color-paper)] hover:text-[var(--color-ink)]"
-          aria-label="关闭"
-        >
-          ×
-        </button>
-      </div>
-      <div className="mt-3 max-h-72 overflow-y-auto">
-        {loading ? (
-          <p className="text-sm text-[var(--color-ink-faint)]">加载中…</p>
-        ) : items.length === 0 ? (
-          <p className="text-sm text-[var(--color-ink-faint)]">{emptyText}</p>
-        ) : (
-          <ul className="space-y-2">
-            {items.map((item) => (
-              <li key={item.id}>
-                <button
-                  type="button"
-                  className="w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-paper)] px-3 py-2.5 text-left text-sm text-[var(--color-ink)] transition-colors hover:border-[var(--color-ink-faint)] hover:bg-[var(--color-surface)]"
-                  onClick={item.onClick}
-                >
-                  {item.content}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>
-  )
 }
 
 export default function Home() {
   const { settings } = useSettings()
   const initialHomeUiRef = useRef<ReturnType<typeof readStoredHomeUiState> | null>(null)
   if (initialHomeUiRef.current === null) {
-    initialHomeUiRef.current = readStoredHomeUiState(Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as RibbonSlotCount)
+    initialHomeUiRef.current = readStoredHomeUiState(
+      Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as RibbonSlotCount,
+    )
   }
   const initialHomeUi = initialHomeUiRef.current
   const [documentId, setDocumentId] = useState<string | null>(null)
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
   const [_echoes, setEchoes] = useState<EchoItem[]>([])
-  const [restoredRibbonSlots, setRestoredRibbonSlots] = useState<Array<EchoItem | null> | null>(initialHomeUi.ribbonSlots)
+  const [restoredRibbonSlots, setRestoredRibbonSlots] = useState<Array<EchoItem | null> | null>(
+    initialHomeUi.ribbonSlots,
+  )
   const [ribbonRestoreFrozen, setRibbonRestoreFrozen] = useState(Boolean(initialHomeUi.ribbonSlots))
-  const [restoredRibbonDocId, setRestoredRibbonDocId] = useState<string | null>(initialHomeUi.documentId)
+  const [restoredRibbonDocId, setRestoredRibbonDocId] = useState<string | null>(
+    initialHomeUi.documentId,
+  )
   const [refreshHoldSlots, setRefreshHoldSlots] = useState<Array<EchoItem | null> | null>(null)
-  const [ribbonState, setRibbonState] = useState<RibbonEngineState>(() => ribbonEngine.createEmptyState())
+  const [ribbonState, setRibbonState] = useState<RibbonEngineState>(() =>
+    ribbonEngine.createEmptyState(),
+  )
   const [currentBlockId, setCurrentBlockId] = useState<string | null>(null)
   const [aiStatus, setAiStatus] = useState<AiStatus>('idle')
-  const [selectedRibbonEcho, setSelectedRibbonEcho] = useState<EchoItem | null>(initialHomeUi.selectedRibbonEcho)
-  const [writingPanelOpen, setWritingPanelOpen] = useState(initialHomeUi.writingPanelOpen)
-  const [writingPanelTab, setWritingPanelTab] = useState<TabKey>(initialHomeUi.writingPanelTab)
+  const [selectedRibbonEcho, setSelectedRibbonEcho] = useState<EchoItem | null>(
+    initialHomeUi.selectedRibbonEcho,
+  )
+  const [contextPanelMode, setContextPanelMode] = useState<'echo' | null>(
+    initialHomeUi.selectedRibbonEcho ? 'echo' : null,
+  )
   const selectedRibbonEchoRef = useRef<EchoItem | null>(null)
   const skipNextKnowledgeHydrateRef = useRef<string | null>(null)
   const [selectionText, setSelectionText] = useState('')
   const [currentParagraph, setCurrentParagraph] = useState('')
-  const [sensoryZoomResults, setSensoryZoomResults] = useState<EchoItem[] | null>(null)
-  const [sensoryZoomLoading, setSensoryZoomLoading] = useState(false)
   const [clicheMatches, setClicheMatches] = useState<ClicheMatch[]>([])
   const [paragraphForCliche, setParagraphForCliche] = useState('')
-  const [showClichePopover, setShowClichePopover] = useState(false)
-  const [clicheAlternatives, setClicheAlternatives] = useState<EchoItem[]>([])
-  const [clicheAlternativesLoading, setClicheAlternativesLoading] = useState(false)
+  const [clicheReview, setClicheReview] = useState<ClicheReviewResult | null>(null)
+  const [clicheReviewLoading, setClicheReviewLoading] = useState(false)
+  const [clicheActionOffset, setClicheActionOffset] = useState<number | null>(null)
+  const [clicheActionHeight, setClicheActionHeight] = useState<number>(18)
+  const [currentParagraphRange, setCurrentParagraphRange] = useState<{
+    from: number
+    to: number
+  } | null>(null)
+  const [_clicheDebugLine, setClicheDebugLine] = useState('')
   const [hasKnowledge, setHasKnowledge] = useState(false)
   const [knowledgeVersion, setKnowledgeVersion] = useState(0)
-  const [activeKnowledgeBase, setActiveKnowledgeBase] = useState<KnowledgeBase | null>(() => knowledgeBaseService.getActive())
+  const [activeKnowledgeBase, setActiveKnowledgeBase] = useState<KnowledgeBase | null>(() =>
+    knowledgeBaseService.getActive(),
+  )
   const [workspace, setWorkspace] = useState<WritingWorkspaceData>({
     materials: [],
     revisions: [],
@@ -462,19 +426,27 @@ export default function Home() {
     practiceDrills: [],
     snapshots: [],
   })
-  const [assistResults, setAssistResults] = useState<Partial<Record<WritingAssistKind, WritingAssistResult | null>>>({})
-  const [assistLoading, setAssistLoading] = useState<Partial<Record<WritingAssistKind, boolean>>>({})
+  const [_assistResults, setAssistResults] = useState<
+    Partial<Record<WritingAssistKind, WritingAssistResult | null>>
+  >({})
+  const [_assistLoading, setAssistLoading] = useState<Partial<Record<WritingAssistKind, boolean>>>(
+    {},
+  )
   const [editorContentVersion, setEditorContentVersion] = useState(0)
 
   const refreshRequestIdRef = useRef<string>('')
   const refreshAbortRef = useRef<AbortController | null>(null)
   const editorRef = useRef<EchoEditorHandle | null>(null)
+  const editorScrollRef = useRef<HTMLDivElement | null>(null)
   const backgroundJobControllersRef = useRef<Record<string, AbortController>>({})
   const backgroundJobSoftTimeoutsRef = useRef<Record<string, number>>({})
-  const backgroundJobsByModuleRef = useRef<Record<string, { jobId: string; snapshotId: string }>>({})
+  const backgroundJobsByModuleRef = useRef<Record<string, { jobId: string; snapshotId: string }>>(
+    {},
+  )
   const lastTextRef = useRef('')
   const lastRefreshedTextRef = useRef('')
   const currentBlockIdRef = useRef<string | null>(null)
+  const clicheReviewAbortRef = useRef<AbortController | null>(null)
   const lastErrorTimeRef = useRef<Record<string, number>>({})
   const hasInitializedRef = useRef(false)
   const suppressNextEditorBeatRef = useRef(false)
@@ -493,7 +465,8 @@ export default function Home() {
     return sanitizeRibbonModules([
       ...BUILTIN_RIBBON_MODULES.filter((builtin) => builtin.type !== 'quick').map((builtin) => ({
         ...builtin,
-        enabled: byId.get(builtin.id)?.enabled ?? (builtin.id === 'rag' || builtin.id === 'ai:imagery'),
+        enabled:
+          byId.get(builtin.id)?.enabled ?? (builtin.id === 'rag' || builtin.id === 'ai:imagery'),
         pinned: byId.get(builtin.id)?.pinned ?? false,
         prompt: byId.get(builtin.id)?.prompt,
         model: byId.get(builtin.id)?.model,
@@ -537,11 +510,17 @@ export default function Home() {
   const renderedRibbonSlots = useMemo(
     () =>
       shouldPreferFrozenRibbonSnapshot
-        ? restoredRibbonSlots ?? []
+        ? (restoredRibbonSlots ?? [])
         : shouldPreferRefreshHold
-          ? refreshHoldSlots ?? []
+          ? (refreshHoldSlots ?? [])
           : liveRibbonSlots,
-    [liveRibbonSlots, refreshHoldSlots, restoredRibbonSlots, shouldPreferFrozenRibbonSnapshot, shouldPreferRefreshHold],
+    [
+      liveRibbonSlots,
+      refreshHoldSlots,
+      restoredRibbonSlots,
+      shouldPreferFrozenRibbonSnapshot,
+      shouldPreferRefreshHold,
+    ],
   )
 
   useEffect(() => {
@@ -553,6 +532,20 @@ export default function Home() {
   useEffect(() => {
     selectedRibbonEchoRef.current = selectedRibbonEcho
   }, [selectedRibbonEcho])
+
+  const contextPanel = useMemo<ContextPanelState | null>(() => {
+    if (contextPanelMode === 'echo' && selectedRibbonEcho) {
+      return {
+        mode: 'echo',
+        item: selectedRibbonEcho,
+      }
+    }
+
+    return null
+  }, [contextPanelMode, selectedRibbonEcho])
+
+  const shouldShowClicheAction = settings.clicheDetectionEnabled && clicheReview?.isCliche === true
+  const hasSideNotes = Boolean(contextPanel)
 
   useEffect(() => {
     setAiStatus(hasApiKey ? 'connected' : 'unconfigured')
@@ -585,8 +578,7 @@ export default function Home() {
     setEchoes((prev) => {
       const next = flowHistory.append(documentId, visibleRibbonEchoes, prev)
       const unchanged =
-        next.length === prev.length &&
-        next.every((item, index) => item.id === prev[index]?.id)
+        next.length === prev.length && next.every((item, index) => item.id === prev[index]?.id)
       return unchanged ? prev : next
     })
   }, [documentId, visibleRibbonEchoes])
@@ -606,18 +598,19 @@ export default function Home() {
   useEffect(() => {
     if (!documentId) return
     try {
-      localStorage.setItem(HOME_UI_STATE_KEY, JSON.stringify({
-        documentId,
-        writingPanelOpen,
-        writingPanelTab,
-        selectedRibbonEchoId: selectedRibbonEcho?.id ?? null,
-        ribbonSlotCount,
-        ribbonSlots: renderedRibbonSlots,
-      }))
+      localStorage.setItem(
+        HOME_UI_STATE_KEY,
+        JSON.stringify({
+          documentId,
+          selectedRibbonEchoId: selectedRibbonEcho?.id ?? null,
+          ribbonSlotCount,
+          ribbonSlots: renderedRibbonSlots,
+        }),
+      )
     } catch {
       // ignore
     }
-  }, [documentId, renderedRibbonSlots, ribbonSlotCount, selectedRibbonEcho?.id, writingPanelOpen, writingPanelTab])
+  }, [documentId, renderedRibbonSlots, ribbonSlotCount, selectedRibbonEcho?.id])
 
   useEffect(() => {
     const checkKnowledge = async () => {
@@ -640,7 +633,10 @@ export default function Home() {
             setRibbonState(
               ribbonEngine.hydrate(
                 filtered,
-                Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as RibbonSlotCount,
+                Math.min(
+                  8,
+                  Math.max(5, settings.ribbonSettings?.slotCount ?? 5),
+                ) as RibbonSlotCount,
                 documentId,
               ),
             )
@@ -666,6 +662,224 @@ export default function Home() {
     clicheEnabledRef.current = settings.clicheDetectionEnabled
   }, [settings.clicheDetectionEnabled])
 
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return
+
+    return devLog.subscribe((entries) => {
+      const clicheEntries = entries.filter(
+        (entry) => entry.tag === 'cliche-detect' || entry.tag === 'cliche-ui',
+      )
+      const latest = clicheEntries.at(-1)
+      if (!latest) {
+        setClicheDebugLine('')
+        return
+      }
+
+      const payload = latest.payload ?? {}
+      const pairs = Object.entries(payload)
+        .slice(0, 6)
+        .map(([key, value]) => `${key}:${String(value)}`)
+        .join(' | ')
+
+      setClicheDebugLine([`${latest.tag}`, latest.message, pairs].filter(Boolean).join(' | '))
+    })
+  }, [])
+
+  useEffect(() => {
+    const paragraphSnapshot = paragraphForCliche.trim()
+    if (!settings.clicheDetectionEnabled || paragraphSnapshot.length < 6) {
+      clicheReviewAbortRef.current?.abort()
+      setClicheReview(null)
+      setClicheReviewLoading(false)
+      return
+    }
+
+    const controller = new AbortController()
+    clicheReviewAbortRef.current?.abort()
+    clicheReviewAbortRef.current = controller
+    const matchedPhrases = clicheMatches.map((item) => item.phrase)
+
+    setClicheReviewLoading(true)
+    setClicheReview(null)
+
+    debugCliche('cliche-detect', 'review requested', {
+      currentBlockId,
+      paragraphLength: paragraphSnapshot.length,
+      matchCount: matchedPhrases.length,
+      phrases: matchedPhrases.slice(0, 6),
+    })
+
+    const timer = window.setTimeout(() => {
+      void reviewParagraphForCliche(
+        paragraphSnapshot,
+        matchedPhrases,
+        {
+          apiKey: settings.apiKey,
+          baseUrl: settings.baseUrl,
+          model: settings.model,
+          ribbonFilterModel: settings.ribbonFilterModel ?? '',
+        },
+        controller.signal,
+      )
+        .then((review) => {
+          if (controller.signal.aborted) return
+          setClicheReview(review)
+          debugCliche('cliche-detect', 'review completed', {
+            currentBlockId,
+            isCliche: review.isCliche,
+            confidence: review.confidence,
+            reasonTag: review.reasonTag,
+            matchedPhrases: review.matchedPhrases,
+          })
+        })
+        .finally(() => {
+          if (controller.signal.aborted) return
+          setClicheReviewLoading(false)
+        })
+    }, 220)
+
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [
+    clicheMatches,
+    currentBlockId,
+    paragraphForCliche,
+    settings.apiKey,
+    settings.baseUrl,
+    settings.clicheDetectionEnabled,
+    settings.model,
+    settings.ribbonFilterModel,
+  ])
+
+  useEffect(() => {
+    if (!shouldShowClicheAction || !currentBlockId) {
+      debugCliche('cliche-ui', 'action hidden', {
+        enabled: shouldShowClicheAction,
+        matches: clicheMatches.length,
+        currentBlockId,
+        reason: !settings.clicheDetectionEnabled
+          ? 'disabled'
+          : !clicheReview?.isCliche
+            ? clicheReviewLoading
+              ? 'awaiting-review'
+              : 'review-rejected'
+            : 'no-active-block',
+      })
+      setClicheActionOffset(null)
+      return
+    }
+
+    const scrollContainer = editorScrollRef.current
+    if (!scrollContainer) {
+      debugCliche('cliche-ui', 'action hidden', {
+        enabled: settings.clicheDetectionEnabled,
+        matches: clicheMatches.length,
+        currentBlockId,
+        reason: 'missing-scroll-container',
+      })
+      setClicheActionOffset(null)
+      return
+    }
+
+    const updateClicheActionOffset = () => {
+      const scrollRect = scrollContainer.getBoundingClientRect()
+
+      if (currentParagraphRange) {
+        const metrics = editorRef.current?.getParagraphViewportMetrics(
+          currentParagraphRange.from,
+          currentParagraphRange.to,
+        )
+
+        if (metrics) {
+          const isVisible = metrics.bottom > scrollRect.top && metrics.top < scrollRect.bottom
+          if (!isVisible) {
+            debugCliche('cliche-ui', 'action hidden', {
+              currentBlockId,
+              reason: 'paragraph-out-of-view',
+              top: metrics.top,
+              bottom: metrics.bottom,
+            })
+            setClicheActionOffset(null)
+            return
+          }
+
+          const nextOffset = metrics.top - scrollRect.top + scrollContainer.scrollTop + 1
+          const nextHeight = Math.max(16, Math.min(44, metrics.bottom - metrics.top))
+          debugCliche('cliche-ui', 'action positioned', {
+            currentBlockId,
+            matches: clicheMatches.length,
+            offset: nextOffset,
+            markerHeight: nextHeight,
+            source: 'editor-metrics',
+          })
+          setClicheActionOffset(nextOffset)
+          setClicheActionHeight(nextHeight)
+          return
+        }
+      }
+
+      const blockElement = scrollContainer.querySelector(
+        `[data-node-id="${escapeNodeIdSelector(currentBlockId)}"]`,
+      ) as HTMLElement | null
+
+      if (!blockElement) {
+        debugCliche('cliche-ui', 'action hidden', {
+          currentBlockId,
+          reason: 'missing-block-element',
+        })
+        setClicheActionOffset(null)
+        return
+      }
+
+      const blockRect = blockElement.getBoundingClientRect()
+      const isVisible = blockRect.bottom > scrollRect.top && blockRect.top < scrollRect.bottom
+
+      if (!isVisible) {
+        debugCliche('cliche-ui', 'action hidden', {
+          currentBlockId,
+          reason: 'block-out-of-view',
+          blockTop: blockRect.top,
+          blockBottom: blockRect.bottom,
+          containerTop: scrollRect.top,
+          containerBottom: scrollRect.bottom,
+        })
+        setClicheActionOffset(null)
+        return
+      }
+
+      const nextOffset = blockRect.top - scrollRect.top + scrollContainer.scrollTop + 2
+      debugCliche('cliche-ui', 'action positioned', {
+        currentBlockId,
+        matches: clicheMatches.length,
+        offset: nextOffset,
+        blockHeight: blockRect.height,
+        source: 'block-rect',
+      })
+      setClicheActionOffset(nextOffset)
+      setClicheActionHeight(Math.max(18, Math.min(42, blockRect.height - 4)))
+    }
+
+    updateClicheActionOffset()
+
+    scrollContainer.addEventListener('scroll', updateClicheActionOffset, { passive: true })
+    window.addEventListener('resize', updateClicheActionOffset)
+
+    return () => {
+      scrollContainer.removeEventListener('scroll', updateClicheActionOffset)
+      window.removeEventListener('resize', updateClicheActionOffset)
+    }
+  }, [
+    clicheMatches.length,
+    clicheReview?.isCliche,
+    clicheReviewLoading,
+    currentBlockId,
+    currentParagraphRange,
+    settings.clicheDetectionEnabled,
+    shouldShowClicheAction,
+  ])
+
   const throttledErrorToast = useCallback((key: string, msg: string) => {
     const now = Date.now()
     if (now - (lastErrorTimeRef.current[key] ?? 0) < ERROR_THROTTLE_MS) return
@@ -675,7 +889,15 @@ export default function Home() {
 
   const loadWorkspace = useCallback((docId: string | null) => {
     if (!docId) {
-      setWorkspace({ materials: [], revisions: [], scenes: [], characterWatchItems: [], memoryNodes: [], practiceDrills: [], snapshots: [] })
+      setWorkspace({
+        materials: [],
+        revisions: [],
+        scenes: [],
+        characterWatchItems: [],
+        memoryNodes: [],
+        practiceDrills: [],
+        snapshots: [],
+      })
       return
     }
     setWorkspace(writingWorkspaceStorage.load(docId))
@@ -698,7 +920,7 @@ export default function Home() {
     }))
   }, [currentBlockId])
 
-  const profile = useMemo<WritingProfileSummary>(() => {
+  const _profile = useMemo<WritingProfileSummary>(() => {
     const tagCounts = new Map<string, number>()
     for (const revision of workspace.revisions) {
       for (const tag of revision.tags) {
@@ -715,9 +937,12 @@ export default function Home() {
       materialCount: workspace.materials.length,
       openRevisionCount: workspace.revisions.filter((item) => item.status === 'open').length,
       sceneCount: workspace.scenes.length,
-      openCharacterWatchCount: workspace.characterWatchItems.filter((item) => item.status === 'open').length,
+      openCharacterWatchCount: workspace.characterWatchItems.filter(
+        (item) => item.status === 'open',
+      ).length,
       memoryNodeCount: workspace.memoryNodes.filter((item) => item.status === 'active').length,
-      openPracticeDrillCount: workspace.practiceDrills.filter((item) => item.status === 'open').length,
+      openPracticeDrillCount: workspace.practiceDrills.filter((item) => item.status === 'open')
+        .length,
       snapshotCount: workspace.snapshots.length,
       topTags,
     }
@@ -729,174 +954,26 @@ export default function Home() {
     return workspace.scenes.find((scene) => scene.blockId === blockId) ?? null
   }, [currentBlockId, workspace.scenes])
 
-  const recordEchoAdoption = useCallback((item: EchoItem) => {
-    if (!documentId) return
-    adoptionStore.recordAdoption(documentId, item)
-    setRibbonState((prev) => ribbonEngine.markAdopted(prev, item))
-  }, [documentId])
+  const recordEchoAdoption = useCallback(
+    (item: EchoItem) => {
+      if (!documentId) return
+      adoptionStore.recordAdoption(documentId, item)
+      setRibbonState((prev) => ribbonEngine.markAdopted(prev, item))
+    },
+    [documentId],
+  )
 
-  const runBackgroundModule = useCallback((
-    snapshotId: string,
-    documentIdForJob: string,
-    slotCount: RibbonSlotCount,
-    text: string,
-    ragResults: EchoItem[],
-    module: RibbonModuleConfig,
-  ) => {
-    if (!hasApiKey) return Promise.resolve()
+  const runBackgroundModule = useCallback(
+    (
+      snapshotId: string,
+      documentIdForJob: string,
+      slotCount: RibbonSlotCount,
+      text: string,
+      ragResults: EchoItem[],
+      module: RibbonModuleConfig,
+    ) => {
+      if (!hasApiKey) return Promise.resolve()
 
-    const existingJob = backgroundJobsByModuleRef.current[module.id]
-    if (
-      existingJob &&
-      existingJob.snapshotId === snapshotId &&
-      backgroundJobControllersRef.current[existingJob.jobId]
-    ) {
-      devLog.push('ribbon', 'background ai job already running, skip duplicate', {
-        moduleId: module.id,
-        snapshotId,
-        existingJobId: existingJob.jobId,
-      })
-      return Promise.resolve()
-    }
-
-    const type = module.type === 'custom' ? 'custom' : module.type === 'ai:quote' ? 'tag' : 'imagery'
-    const jobId = generateId()
-    setRibbonState((prev) => {
-      const next = ribbonEngine.registerJob(prev, snapshotId, type, module.id, jobId)
-      return ribbonEngine.markJobRunning(next.state, next.jobId)
-    })
-
-    const controller = new AbortController()
-    backgroundJobControllersRef.current[jobId] = controller
-    backgroundJobsByModuleRef.current[module.id] = { jobId, snapshotId }
-    setAiStatus('loading')
-
-    const { softTimeoutMs, hardTimeoutMs } = getModuleTimeouts(
-      module,
-      settings.reliableRibbonMode,
-      settings.lowLatencyMode,
-    )
-
-    const clearJobHandles = () => {
-      const softTimeoutId = backgroundJobSoftTimeoutsRef.current[jobId]
-      if (softTimeoutId != null) {
-        window.clearTimeout(softTimeoutId)
-        delete backgroundJobSoftTimeoutsRef.current[jobId]
-      }
-      delete backgroundJobControllersRef.current[jobId]
-      if (backgroundJobsByModuleRef.current[module.id]?.jobId === jobId) {
-        delete backgroundJobsByModuleRef.current[module.id]
-      }
-    }
-
-    const runAttempt = (attempt: number): Promise<void> => {
-      const attemptController = new AbortController()
-      backgroundJobControllersRef.current[jobId] = attemptController
-      backgroundJobSoftTimeoutsRef.current[jobId] = window.setTimeout(() => {
-        if (!backgroundJobControllersRef.current[jobId]) return
-        devLog.push('ribbon', 'background ai job soft timeout', {
-          moduleId: module.id,
-          snapshotId,
-          jobId,
-          softTimeoutMs,
-          attempt: attempt + 1,
-        })
-        setRibbonState((prev) => ribbonEngine.markJobSoftTimedOut(prev, jobId, 'soft timeout, continuing'))
-      }, softTimeoutMs)
-
-      return generateEchoesForModule(
-        text,
-        ragResults,
-        {
-          apiKey: settings.apiKey,
-          baseUrl: settings.baseUrl,
-          model: settings.model,
-          ribbonFilterModel: settings.ribbonFilterModel ?? '',
-        },
-        {
-          type: module.type,
-          id: module.id,
-          prompt: module.prompt,
-          model: module.model,
-          label: module.label,
-        },
-        currentBlockIdRef.current ?? undefined,
-        {
-          signal: attemptController.signal,
-          timeoutMs: hardTimeoutMs,
-        },
-      )
-        .then((result) => {
-          clearJobHandles()
-          const taggedItems = withSnapshotId(result.items, snapshotId)
-          if (taggedItems.length > 0) {
-            setEchoes((prev) => flowHistory.append(documentIdForJob, taggedItems, prev))
-          }
-          if (refreshRequestIdRef.current !== snapshotId || taggedItems.length === 0) {
-            setRibbonState((prev) => ribbonEngine.markJobDone(prev, jobId))
-            return
-          }
-
-          const origin =
-            module.type === 'custom'
-              ? 'ai_custom'
-              : module.type === 'ai:quote'
-                ? 'ai_tag'
-                : 'ai_imagery'
-
-          setRibbonState((prev) => {
-            const snapshot = prev.currentSnapshot
-            if (!snapshot || snapshot.id !== snapshotId) return ribbonEngine.markJobDone(prev, jobId)
-            const patched = ribbonEngine.ingestAi(prev, snapshot, taggedItems, origin, slotCount)
-            return ribbonEngine.markJobDone(patched, jobId)
-          })
-        })
-        .catch((err) => {
-          clearJobHandles()
-          const message = (err as Error)?.message ?? 'unknown'
-          const retriable = message === 'NETWORK_ERROR' || message.startsWith('NETWORK_ERROR:')
-          if (retriable && attempt === 0 && refreshRequestIdRef.current === snapshotId) {
-            devLog.push('ribbon', 'background ai job retrying after network error', {
-              moduleId: module.id,
-              snapshotId,
-              jobId,
-              retryInMs: RIBBON_NETWORK_RETRY_DELAY_MS,
-            })
-            return new Promise<void>((resolve) => {
-              window.setTimeout(() => {
-                void runAttempt(1).finally(resolve)
-              }, RIBBON_NETWORK_RETRY_DELAY_MS)
-            })
-          }
-
-          devLog.push('ribbon', 'background ai job failed', {
-            moduleId: module.id,
-            error: message,
-            attempt: attempt + 1,
-          })
-          setRibbonState((prev) => ribbonEngine.markJobFailed(prev, jobId, message))
-        })
-        .finally(() => {
-          if (Object.keys(backgroundJobControllersRef.current).length === 0) {
-            setAiStatus(hasApiKey ? 'connected' : 'unconfigured')
-          }
-        })
-    }
-
-    return runAttempt(0)
-  }, [hasApiKey, settings])
-
-  const runBackgroundModuleBatch = useCallback((
-    snapshotId: string,
-    documentIdForJob: string,
-    slotCount: RibbonSlotCount,
-    text: string,
-    ragResults: EchoItem[],
-    modules: RibbonModuleConfig[],
-  ) => {
-    if (!hasApiKey || modules.length < 2) return Promise.resolve()
-
-    const batchableModules = modules.filter((module) => {
       const existingJob = backgroundJobsByModuleRef.current[module.id]
       if (
         existingJob &&
@@ -908,59 +985,29 @@ export default function Home() {
           snapshotId,
           existingJobId: existingJob.jobId,
         })
-        return false
+        return Promise.resolve()
       }
-      return true
-    })
 
-    if (batchableModules.length < 2) return Promise.resolve()
-
-    const controller = new AbortController()
-    const jobs = batchableModules.map((module) => {
-      const type = module.type === 'custom' ? 'custom' : module.type === 'ai:quote' ? 'tag' : 'imagery'
-      const origin: 'ai_imagery' | 'ai_tag' | 'ai_custom' =
-        module.type === 'custom'
-          ? 'ai_custom'
-          : module.type === 'ai:quote'
-            ? 'ai_tag'
-            : 'ai_imagery'
+      const type =
+        module.type === 'custom' ? 'custom' : module.type === 'ai:quote' ? 'tag' : 'imagery'
       const jobId = generateId()
-
       setRibbonState((prev) => {
         const next = ribbonEngine.registerJob(prev, snapshotId, type, module.id, jobId)
         return ribbonEngine.markJobRunning(next.state, next.jobId)
       })
 
+      const controller = new AbortController()
       backgroundJobControllersRef.current[jobId] = controller
       backgroundJobsByModuleRef.current[module.id] = { jobId, snapshotId }
+      setAiStatus('loading')
 
-      return { module, jobId, origin }
-    })
+      const { softTimeoutMs, hardTimeoutMs } = getModuleTimeouts(
+        module,
+        settings.reliableRibbonMode,
+        settings.lowLatencyMode,
+      )
 
-    const softTimeoutMs = Math.max(
-      ...batchableModules.map((module) => getModuleTimeouts(module, settings.reliableRibbonMode, settings.lowLatencyMode).softTimeoutMs),
-    )
-    const hardTimeoutMs = Math.max(
-      ...batchableModules.map((module) => getModuleTimeouts(module, settings.reliableRibbonMode, settings.lowLatencyMode).hardTimeoutMs),
-    )
-
-    setAiStatus('loading')
-
-    for (const { module, jobId } of jobs) {
-      backgroundJobSoftTimeoutsRef.current[jobId] = window.setTimeout(() => {
-        if (!backgroundJobControllersRef.current[jobId]) return
-        devLog.push('ribbon', 'background ai batch soft timeout', {
-          moduleId: module.id,
-          snapshotId,
-          jobId,
-          softTimeoutMs,
-        })
-        setRibbonState((prev) => ribbonEngine.markJobSoftTimedOut(prev, jobId, 'soft timeout, continuing'))
-      }, softTimeoutMs)
-    }
-
-    const clearJobHandles = () => {
-      for (const { module, jobId } of jobs) {
+      const clearJobHandles = () => {
         const softTimeoutId = backgroundJobSoftTimeoutsRef.current[jobId]
         if (softTimeoutId != null) {
           window.clearTimeout(softTimeoutId)
@@ -971,291 +1018,573 @@ export default function Home() {
           delete backgroundJobsByModuleRef.current[module.id]
         }
       }
-    }
 
-    devLog.push('ribbon', 'background ai batch started', {
-      snapshotId,
-      modules: batchableModules.map((module) => module.id),
-      hardTimeoutMs,
-    })
-
-    return generateBatchEchoesForModules(
-      text,
-      ragResults,
-      {
-        apiKey: settings.apiKey,
-        baseUrl: settings.baseUrl,
-        model: settings.model,
-        ribbonFilterModel: settings.ribbonFilterModel ?? '',
-      },
-      batchableModules.map((module) => ({
-        type: module.type,
-        id: module.id,
-        prompt: module.prompt,
-        model: module.model,
-        label: module.label,
-      })),
-      currentBlockIdRef.current ?? undefined,
-      {
-        signal: controller.signal,
-        timeoutMs: hardTimeoutMs,
-      },
-    )
-      .then((result) => {
-        clearJobHandles()
-        const emptyModules: RibbonModuleConfig[] = []
-
-        for (const { module, jobId, origin } of jobs) {
-          const taggedItems = withSnapshotId(result.byModuleId[module.id] ?? [], snapshotId)
-          if (taggedItems.length === 0) {
-            emptyModules.push(module)
-          }
-          if (taggedItems.length > 0) {
-            setEchoes((prev) => flowHistory.append(documentIdForJob, taggedItems, prev))
-          }
-
-          setRibbonState((prev) => {
-            const snapshot = prev.currentSnapshot
-            if (!snapshot || snapshot.id !== snapshotId || taggedItems.length === 0) {
-              return ribbonEngine.markJobDone(prev, jobId)
-            }
-            const patched = ribbonEngine.ingestAi(prev, snapshot, taggedItems, origin, slotCount)
-            return ribbonEngine.markJobDone(patched, jobId)
-          })
-        }
-
-        if (emptyModules.length > 0 && refreshRequestIdRef.current === snapshotId && !settings.lowLatencyMode) {
-          devLog.push('ribbon', 'background ai batch empty-module fallback', {
+      const runAttempt = (attempt: number): Promise<void> => {
+        const attemptController = new AbortController()
+        backgroundJobControllersRef.current[jobId] = attemptController
+        backgroundJobSoftTimeoutsRef.current[jobId] = window.setTimeout(() => {
+          if (!backgroundJobControllersRef.current[jobId]) return
+          devLog.push('ribbon', 'background ai job soft timeout', {
+            moduleId: module.id,
             snapshotId,
-            modules: emptyModules.map((module) => module.id),
+            jobId,
+            softTimeoutMs,
+            attempt: attempt + 1,
           })
-          return Promise.all(
-            emptyModules.map((module) =>
-              runBackgroundModule(snapshotId, documentIdForJob, slotCount, text, ragResults, module),
-            ),
-          ).then(() => {})
-        }
-      })
-      .catch((err) => {
-        clearJobHandles()
-        const message = (err as Error)?.message ?? 'unknown'
-        devLog.push('ribbon', 'background ai batch failed', {
-          snapshotId,
-          modules: batchableModules.map((module) => module.id),
-          error: message,
-        })
-        setRibbonState((prev) =>
-          jobs.reduce((state, { jobId }) => ribbonEngine.markJobFailed(state, jobId, message), prev),
-        )
-        throw err
-      })
-      .finally(() => {
-        if (Object.keys(backgroundJobControllersRef.current).length === 0) {
-          setAiStatus(hasApiKey ? 'connected' : 'unconfigured')
-        }
-      })
-  }, [hasApiKey, settings])
-
-  const cancelActiveRibbonJobs = useCallback((reason: string) => {
-    const activeJobIds = Object.keys(backgroundJobControllersRef.current)
-    if (activeJobIds.length === 0) return
-
-    for (const timeoutId of Object.values(backgroundJobSoftTimeoutsRef.current)) {
-      window.clearTimeout(timeoutId)
-    }
-
-    for (const controller of Object.values(backgroundJobControllersRef.current)) {
-      try {
-        controller.abort()
-      } catch {
-        // ignore
-      }
-    }
-
-    backgroundJobControllersRef.current = {}
-    backgroundJobSoftTimeoutsRef.current = {}
-    backgroundJobsByModuleRef.current = {}
-    setRibbonState((prev) =>
-      activeJobIds.reduce((state, jobId) => ribbonEngine.markJobCancelled(state, jobId, reason), prev),
-    )
-    setAiStatus(hasApiKey ? 'connected' : 'unconfigured')
-    devLog.push('ribbon', 'cancelled active background jobs', {
-      reason,
-      count: activeJobIds.length,
-    })
-  }, [hasApiKey])
-
-  const handlePause = useCallback(async (text: string) => {
-    if (!documentId) return
-
-    const trimmed = text.trim()
-    lastTextRef.current = text
-    setRefreshHoldSlots(renderedRibbonSlots)
-    if (ribbonRestoreFrozen) {
-      setRibbonRestoreFrozen(false)
-      setRestoredRibbonSlots(null)
-      setRestoredRibbonDocId(null)
-      devLog.push('ribbon-ui', 'unfreeze restored ribbon on refresh', { documentId })
-    }
-    devLog.push('ribbon', 'handlePause invoked', { textLen: text.length })
-
-    if (trimmed.length < 2) {
-      devLog.push('ribbon', 'handlePause early exit: text too short', {})
-      return
-    }
-
-    if (trimmed === lastRefreshedTextRef.current) {
-      devLog.push('ribbon', 'handlePause early exit: same as lastRefreshed', {})
-      return
-    }
-
-    try {
-      refreshAbortRef.current?.abort()
-    } catch {
-      // ignore
-    }
-    cancelActiveRibbonJobs('superseded by newer ribbon refresh')
-
-    const controller = new AbortController()
-    refreshAbortRef.current = controller
-
-    const slotCount = Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as RibbonSlotCount
-    const savedModules = settings.ribbonSettings?.modules ?? []
-    const byId = new Map(savedModules.map((m) => [m.id, m]))
-    const allModules: RibbonModuleConfig[] = [
-      ...BUILTIN_RIBBON_MODULES.filter((builtin) => builtin.type !== 'quick').map((builtin) => ({
-        ...builtin,
-        enabled: byId.get(builtin.id)?.enabled ?? (builtin.id === 'rag' || builtin.id === 'ai:imagery'),
-        pinned: byId.get(builtin.id)?.pinned ?? false,
-        prompt: byId.get(builtin.id)?.prompt,
-        model: byId.get(builtin.id)?.model,
-      })),
-      ...savedModules.filter((module) => module.type === 'custom'),
-    ]
-    const enabledModules = allModules.filter((module) => module.enabled)
-
-    const snapshot = ribbonEngine.createSnapshot(documentId, trimmed, currentBlockIdRef.current)
-    refreshRequestIdRef.current = snapshot.id
-    setRibbonState((prev) =>
-      ribbonEngine.startSnapshot(
-        prev,
-        snapshot,
-        slotCount,
-        enabledModules.filter((module) => module.type !== 'rag' && module.pinned).map((module) => module.id),
-      ),
-    )
-    debugIngest('H2', 'page.tsx:handlePause', 'refresh start', {
-      textLen: trimmed.length,
-      hasApiKey,
-      slotCount,
-    })
-
-    try {
-      const active = knowledgeBaseService.getActive()
-      const ragModuleEnabled = enabledModules.some((module) => module.type === 'rag')
-      const mandatoryBookIds = active?.mandatoryBooks ?? []
-      const mandatoryMaxSlots = Math.min(3, Math.max(1, active?.mandatoryMaxSlots ?? 1)) as MandatoryMaxSlots
-      const chunks = ragModuleEnabled && active?.id ? await getChunksByBase(active.id) : []
-
-      if (refreshRequestIdRef.current !== snapshot.id) return
-
-      let stableEchoes = ragModuleEnabled && active?.id
-        ? await ragService.search(
-            trimmed,
-            {
-              knowledgeBaseId: active.id,
-              mandatoryBookIds,
-              mandatoryMaxSlots,
-            },
-            currentBlockIdRef.current ?? undefined,
-            chunks.length > 0 ? chunks : undefined,
+          setRibbonState((prev) =>
+            ribbonEngine.markJobSoftTimedOut(prev, jobId, 'soft timeout, continuing'),
           )
-        : []
+        }, softTimeoutMs)
 
-      if (refreshRequestIdRef.current !== snapshot.id) return
+        return generateEchoesForModule(
+          text,
+          ragResults,
+          {
+            apiKey: settings.apiKey,
+            baseUrl: settings.baseUrl,
+            model: settings.model,
+            ribbonFilterModel: settings.ribbonFilterModel ?? '',
+          },
+          {
+            type: module.type,
+            id: module.id,
+            prompt: module.prompt,
+            model: module.model,
+            label: module.label,
+          },
+          currentBlockIdRef.current ?? undefined,
+          {
+            signal: attemptController.signal,
+            timeoutMs: hardTimeoutMs,
+          },
+        )
+          .then((result) => {
+            clearJobHandles()
+            const taggedItems = withSnapshotId(result.items, snapshotId)
+            if (taggedItems.length > 0) {
+              setEchoes((prev) => flowHistory.append(documentIdForJob, taggedItems, prev))
+            }
+            if (refreshRequestIdRef.current !== snapshotId || taggedItems.length === 0) {
+              setRibbonState((prev) => ribbonEngine.markJobDone(prev, jobId))
+              return
+            }
 
-      stableEchoes = filterEchoesForKnowledgeBase(
-        adoptionStore.boostOrderByAdoptions(stableEchoes, documentId),
-        active,
-      ).map((item) => ({
-        ...item,
-        moduleId: item.moduleId ?? 'rag',
-        moduleLabel: item.moduleLabel ?? '知识检索',
-        ribbonText: item.ribbonText ?? item.content ?? item.shortSummary ?? item.originalText ?? '',
-      }))
-      devLog.push('ribbon', 'stable echoes ready', { count: stableEchoes.length })
+            const origin =
+              module.type === 'custom'
+                ? 'ai_custom'
+                : module.type === 'ai:quote'
+                  ? 'ai_tag'
+                  : 'ai_imagery'
 
-      const taggedStableEchoes = withSnapshotId(stableEchoes, snapshot.id)
-      setRibbonState((prev) => ribbonEngine.ingestStable(prev, snapshot, taggedStableEchoes, slotCount))
-      lastRefreshedTextRef.current = trimmed
+            setRibbonState((prev) => {
+              const snapshot = prev.currentSnapshot
+              if (!snapshot || snapshot.id !== snapshotId)
+                return ribbonEngine.markJobDone(prev, jobId)
+              const patched = ribbonEngine.ingestAi(prev, snapshot, taggedItems, origin, slotCount)
+              return ribbonEngine.markJobDone(patched, jobId)
+            })
+          })
+          .catch((err) => {
+            clearJobHandles()
+            const message = (err as Error)?.message ?? 'unknown'
+            const retriable = message === 'NETWORK_ERROR' || message.startsWith('NETWORK_ERROR:')
+            if (retriable && attempt === 0 && refreshRequestIdRef.current === snapshotId) {
+              devLog.push('ribbon', 'background ai job retrying after network error', {
+                moduleId: module.id,
+                snapshotId,
+                jobId,
+                retryInMs: RIBBON_NETWORK_RETRY_DELAY_MS,
+              })
+              return new Promise<void>((resolve) => {
+                window.setTimeout(() => {
+                  void runAttempt(1).finally(resolve)
+                }, RIBBON_NETWORK_RETRY_DELAY_MS)
+              })
+            }
 
-      if (!hasApiKey) {
-        setAiStatus('unconfigured')
+            devLog.push('ribbon', 'background ai job failed', {
+              moduleId: module.id,
+              error: message,
+              attempt: attempt + 1,
+            })
+            setRibbonState((prev) => ribbonEngine.markJobFailed(prev, jobId, message))
+          })
+          .finally(() => {
+            if (Object.keys(backgroundJobControllersRef.current).length === 0) {
+              setAiStatus(hasApiKey ? 'connected' : 'unconfigured')
+            }
+          })
+      }
+
+      return runAttempt(0)
+    },
+    [hasApiKey, settings],
+  )
+
+  const runBackgroundModuleBatch = useCallback(
+    (
+      snapshotId: string,
+      documentIdForJob: string,
+      slotCount: RibbonSlotCount,
+      text: string,
+      ragResults: EchoItem[],
+      modules: RibbonModuleConfig[],
+    ) => {
+      if (!hasApiKey || modules.length < 2) return Promise.resolve()
+
+      const batchableModules = modules.filter((module) => {
+        const existingJob = backgroundJobsByModuleRef.current[module.id]
+        if (
+          existingJob &&
+          existingJob.snapshotId === snapshotId &&
+          backgroundJobControllersRef.current[existingJob.jobId]
+        ) {
+          devLog.push('ribbon', 'background ai job already running, skip duplicate', {
+            moduleId: module.id,
+            snapshotId,
+            existingJobId: existingJob.jobId,
+          })
+          return false
+        }
+        return true
+      })
+
+      if (batchableModules.length < 2) return Promise.resolve()
+
+      const controller = new AbortController()
+      const jobs = batchableModules.map((module) => {
+        const type =
+          module.type === 'custom' ? 'custom' : module.type === 'ai:quote' ? 'tag' : 'imagery'
+        const origin: 'ai_imagery' | 'ai_tag' | 'ai_custom' =
+          module.type === 'custom'
+            ? 'ai_custom'
+            : module.type === 'ai:quote'
+              ? 'ai_tag'
+              : 'ai_imagery'
+        const jobId = generateId()
+
+        setRibbonState((prev) => {
+          const next = ribbonEngine.registerJob(prev, snapshotId, type, module.id, jobId)
+          return ribbonEngine.markJobRunning(next.state, next.jobId)
+        })
+
+        backgroundJobControllersRef.current[jobId] = controller
+        backgroundJobsByModuleRef.current[module.id] = { jobId, snapshotId }
+
+        return { module, jobId, origin }
+      })
+
+      const softTimeoutMs = Math.max(
+        ...batchableModules.map(
+          (module) =>
+            getModuleTimeouts(module, settings.reliableRibbonMode, settings.lowLatencyMode)
+              .softTimeoutMs,
+        ),
+      )
+      const hardTimeoutMs = Math.max(
+        ...batchableModules.map(
+          (module) =>
+            getModuleTimeouts(module, settings.reliableRibbonMode, settings.lowLatencyMode)
+              .hardTimeoutMs,
+        ),
+      )
+
+      setAiStatus('loading')
+
+      for (const { module, jobId } of jobs) {
+        backgroundJobSoftTimeoutsRef.current[jobId] = window.setTimeout(() => {
+          if (!backgroundJobControllersRef.current[jobId]) return
+          devLog.push('ribbon', 'background ai batch soft timeout', {
+            moduleId: module.id,
+            snapshotId,
+            jobId,
+            softTimeoutMs,
+          })
+          setRibbonState((prev) =>
+            ribbonEngine.markJobSoftTimedOut(prev, jobId, 'soft timeout, continuing'),
+          )
+        }, softTimeoutMs)
+      }
+
+      const clearJobHandles = () => {
+        for (const { module, jobId } of jobs) {
+          const softTimeoutId = backgroundJobSoftTimeoutsRef.current[jobId]
+          if (softTimeoutId != null) {
+            window.clearTimeout(softTimeoutId)
+            delete backgroundJobSoftTimeoutsRef.current[jobId]
+          }
+          delete backgroundJobControllersRef.current[jobId]
+          if (backgroundJobsByModuleRef.current[module.id]?.jobId === jobId) {
+            delete backgroundJobsByModuleRef.current[module.id]
+          }
+        }
+      }
+
+      devLog.push('ribbon', 'background ai batch started', {
+        snapshotId,
+        modules: batchableModules.map((module) => module.id),
+        hardTimeoutMs,
+      })
+
+      return generateBatchEchoesForModules(
+        text,
+        ragResults,
+        {
+          apiKey: settings.apiKey,
+          baseUrl: settings.baseUrl,
+          model: settings.model,
+          ribbonFilterModel: settings.ribbonFilterModel ?? '',
+        },
+        batchableModules.map((module) => ({
+          type: module.type,
+          id: module.id,
+          prompt: module.prompt,
+          model: module.model,
+          label: module.label,
+        })),
+        currentBlockIdRef.current ?? undefined,
+        {
+          signal: controller.signal,
+          timeoutMs: hardTimeoutMs,
+        },
+      )
+        .then((result) => {
+          clearJobHandles()
+          const emptyModules: RibbonModuleConfig[] = []
+
+          for (const { module, jobId, origin } of jobs) {
+            const taggedItems = withSnapshotId(result.byModuleId[module.id] ?? [], snapshotId)
+            if (taggedItems.length === 0) {
+              emptyModules.push(module)
+            }
+            if (taggedItems.length > 0) {
+              setEchoes((prev) => flowHistory.append(documentIdForJob, taggedItems, prev))
+            }
+
+            setRibbonState((prev) => {
+              const snapshot = prev.currentSnapshot
+              if (!snapshot || snapshot.id !== snapshotId || taggedItems.length === 0) {
+                return ribbonEngine.markJobDone(prev, jobId)
+              }
+              const patched = ribbonEngine.ingestAi(prev, snapshot, taggedItems, origin, slotCount)
+              return ribbonEngine.markJobDone(patched, jobId)
+            })
+          }
+
+          if (
+            emptyModules.length > 0 &&
+            refreshRequestIdRef.current === snapshotId &&
+            !settings.lowLatencyMode
+          ) {
+            devLog.push('ribbon', 'background ai batch empty-module fallback', {
+              snapshotId,
+              modules: emptyModules.map((module) => module.id),
+            })
+            return Promise.all(
+              emptyModules.map((module) =>
+                runBackgroundModule(
+                  snapshotId,
+                  documentIdForJob,
+                  slotCount,
+                  text,
+                  ragResults,
+                  module,
+                ),
+              ),
+            ).then(() => {})
+          }
+        })
+        .catch((err) => {
+          clearJobHandles()
+          const message = (err as Error)?.message ?? 'unknown'
+          devLog.push('ribbon', 'background ai batch failed', {
+            snapshotId,
+            modules: batchableModules.map((module) => module.id),
+            error: message,
+          })
+          setRibbonState((prev) =>
+            jobs.reduce(
+              (state, { jobId }) => ribbonEngine.markJobFailed(state, jobId, message),
+              prev,
+            ),
+          )
+          throw err
+        })
+        .finally(() => {
+          if (Object.keys(backgroundJobControllersRef.current).length === 0) {
+            setAiStatus(hasApiKey ? 'connected' : 'unconfigured')
+          }
+        })
+    },
+    [hasApiKey, runBackgroundModule, settings],
+  )
+
+  const cancelActiveRibbonJobs = useCallback(
+    (reason: string) => {
+      const activeJobIds = Object.keys(backgroundJobControllersRef.current)
+      if (activeJobIds.length === 0) return
+
+      for (const timeoutId of Object.values(backgroundJobSoftTimeoutsRef.current)) {
+        window.clearTimeout(timeoutId)
+      }
+
+      for (const controller of Object.values(backgroundJobControllersRef.current)) {
+        try {
+          controller.abort()
+        } catch {
+          // ignore
+        }
+      }
+
+      backgroundJobControllersRef.current = {}
+      backgroundJobSoftTimeoutsRef.current = {}
+      backgroundJobsByModuleRef.current = {}
+      setRibbonState((prev) =>
+        activeJobIds.reduce(
+          (state, jobId) => ribbonEngine.markJobCancelled(state, jobId, reason),
+          prev,
+        ),
+      )
+      setAiStatus(hasApiKey ? 'connected' : 'unconfigured')
+      devLog.push('ribbon', 'cancelled active background jobs', {
+        reason,
+        count: activeJobIds.length,
+      })
+    },
+    [hasApiKey],
+  )
+
+  const handlePause = useCallback(
+    async (text: string) => {
+      if (!documentId) return
+
+      const trimmed = text.trim()
+      lastTextRef.current = text
+      devLog.push('ribbon', 'handlePause invoked', { textLen: text.length })
+
+      if (trimmed.length < 2) {
+        devLog.push('ribbon', 'handlePause early exit: text too short', {})
         return
       }
 
-      const aiModules = sortRibbonModulesForExecution(
-        enabledModules.filter((module) => module.type !== 'rag' && module.type !== 'quick'),
-      )
-      const batchModules = aiModules.filter((module) => canBatchGenerateEchoesForModule(module))
-      const singleModules = aiModules.filter((module) => !canBatchGenerateEchoesForModule(module))
-
-      void (async () => {
-        const runQueuedModules = async (queuedModules: RibbonModuleConfig[]) => {
-          const queue = [...queuedModules]
-          const workerCount = Math.min(RIBBON_BACKGROUND_CONCURRENCY, queue.length)
-
-          await Promise.all(
-            Array.from({ length: workerCount }, async () => {
-              while (queue.length > 0) {
-                if (refreshRequestIdRef.current !== snapshot.id) return
-                const nextModule = queue.shift()
-                if (!nextModule) return
-                await runBackgroundModule(snapshot.id, documentId, slotCount, trimmed, stableEchoes, nextModule)
-              }
-            }),
-          )
-        }
-
-        const tasks: Array<Promise<void>> = []
-
-        if (batchModules.length >= 2) {
-          tasks.push(
-            runBackgroundModuleBatch(snapshot.id, documentId, slotCount, trimmed, stableEchoes, batchModules).catch((err) => {
-              devLog.push('ribbon', 'background ai batch fallback to single-module queue', {
-                snapshotId: snapshot.id,
-                modules: batchModules.map((module) => module.id),
-                error: (err as Error)?.message ?? 'unknown',
-              })
-              return runQueuedModules(batchModules)
-            }),
-          )
-        } else if (batchModules.length === 1) {
-          singleModules.unshift(batchModules[0])
-        }
-
-        if (singleModules.length > 0) {
-          tasks.push(runQueuedModules(singleModules))
-        }
-
-        await Promise.all(tasks)
-      })()
-    } catch (err) {
-      setAiStatus(hasApiKey ? 'error' : 'unconfigured')
-      const msg = (err as Error).message
-      if (msg === 'API_KEY_INVALID') {
-        throttledErrorToast('auth', 'API Key 鏃犳晥鎴栧凡杩囨湡锛岃鍦ㄨ缃腑鏇存柊')
-      } else if (msg === 'RATE_LIMITED') {
-        throttledErrorToast('rate', 'AI 璇锋眰棰戠巼瓒呴檺锛岃绋嶅悗鍐嶈瘯')
-      } else if (msg === 'NETWORK_TIMEOUT') {
-        throttledErrorToast('timeout', '杩炴帴瓒呮椂锛岃妫€鏌ョ綉缁滄垨 Base URL')
-      } else {
-        throttledErrorToast('generic', msg.length > 60 ? '回声刷新失败，请检查当前配置' : msg)
+      if (trimmed === lastRefreshedTextRef.current) {
+        devLog.push('ribbon', 'handlePause early exit: same as lastRefreshed', {})
+        return
       }
-    } finally {
-      refreshAbortRef.current = null
-    }
-  }, [cancelActiveRibbonJobs, documentId, hasApiKey, renderedRibbonSlots, ribbonRestoreFrozen, runBackgroundModule, runBackgroundModuleBatch, settings, throttledErrorToast])
+
+      setRefreshHoldSlots(renderedRibbonSlots)
+      if (ribbonRestoreFrozen) {
+        setRibbonRestoreFrozen(false)
+        setRestoredRibbonSlots(null)
+        setRestoredRibbonDocId(null)
+        devLog.push('ribbon-ui', 'unfreeze restored ribbon on refresh', { documentId })
+      }
+
+      try {
+        refreshAbortRef.current?.abort()
+      } catch {
+        // ignore
+      }
+      cancelActiveRibbonJobs('superseded by newer ribbon refresh')
+
+      const controller = new AbortController()
+      refreshAbortRef.current = controller
+
+      const slotCount = Math.min(
+        8,
+        Math.max(5, settings.ribbonSettings?.slotCount ?? 5),
+      ) as RibbonSlotCount
+      const savedModules = settings.ribbonSettings?.modules ?? []
+      const byId = new Map(savedModules.map((m) => [m.id, m]))
+      const allModules: RibbonModuleConfig[] = [
+        ...BUILTIN_RIBBON_MODULES.filter((builtin) => builtin.type !== 'quick').map((builtin) => ({
+          ...builtin,
+          enabled:
+            byId.get(builtin.id)?.enabled ?? (builtin.id === 'rag' || builtin.id === 'ai:imagery'),
+          pinned: byId.get(builtin.id)?.pinned ?? false,
+          prompt: byId.get(builtin.id)?.prompt,
+          model: byId.get(builtin.id)?.model,
+        })),
+        ...savedModules.filter((module) => module.type === 'custom'),
+      ]
+      const enabledModules = allModules.filter((module) => module.enabled)
+
+      const snapshot = ribbonEngine.createSnapshot(documentId, trimmed, currentBlockIdRef.current)
+      refreshRequestIdRef.current = snapshot.id
+      setRibbonState((prev) =>
+        ribbonEngine.startSnapshot(
+          prev,
+          snapshot,
+          slotCount,
+          enabledModules
+            .filter((module) => module.type !== 'rag' && module.pinned)
+            .map((module) => module.id),
+        ),
+      )
+      try {
+        const active = knowledgeBaseService.getActive()
+        const ragModuleEnabled = enabledModules.some((module) => module.type === 'rag')
+        const mandatoryBookIds = active?.mandatoryBooks ?? []
+        const mandatoryMaxSlots = Math.min(
+          3,
+          Math.max(1, active?.mandatoryMaxSlots ?? 1),
+        ) as MandatoryMaxSlots
+        const chunks = ragModuleEnabled && active?.id ? await getChunksByBase(active.id) : []
+
+        if (refreshRequestIdRef.current !== snapshot.id) return
+
+        let stableEchoes =
+          ragModuleEnabled && active?.id
+            ? await ragService.search(
+                trimmed,
+                {
+                  knowledgeBaseId: active.id,
+                  mandatoryBookIds,
+                  mandatoryMaxSlots,
+                },
+                currentBlockIdRef.current ?? undefined,
+                chunks.length > 0 ? chunks : undefined,
+              )
+            : []
+
+        if (refreshRequestIdRef.current !== snapshot.id) return
+
+        stableEchoes = filterEchoesForKnowledgeBase(
+          adoptionStore.boostOrderByAdoptions(stableEchoes, documentId),
+          active,
+        ).map((item) => ({
+          ...item,
+          moduleId: item.moduleId ?? 'rag',
+          moduleLabel: item.moduleLabel ?? '知识检索',
+          ribbonText:
+            item.ribbonText ?? item.content ?? item.shortSummary ?? item.originalText ?? '',
+        }))
+
+        if (hasApiKey && stableEchoes.length > 1) {
+          const filteredStableEchoes = await filterRibbonCandidates(
+            trimmed,
+            stableEchoes,
+            {
+              apiKey: settings.apiKey,
+              baseUrl: settings.baseUrl,
+              model: settings.model,
+              ribbonFilterModel: settings.ribbonFilterModel ?? '',
+            },
+            controller.signal,
+          )
+
+          if (refreshRequestIdRef.current !== snapshot.id) return
+
+          devLog.push('ribbon', 'stable echoes filtered', {
+            beforeCount: stableEchoes.length,
+            afterCount: filteredStableEchoes.length,
+            usedFilter: filteredStableEchoes.length !== stableEchoes.length,
+          })
+
+          stableEchoes = filteredStableEchoes
+        }
+
+        devLog.push('ribbon', 'stable echoes ready', { count: stableEchoes.length })
+
+        const taggedStableEchoes = withSnapshotId(stableEchoes, snapshot.id)
+        setRibbonState((prev) =>
+          ribbonEngine.ingestStable(prev, snapshot, taggedStableEchoes, slotCount),
+        )
+        lastRefreshedTextRef.current = trimmed
+
+        if (!hasApiKey) {
+          setAiStatus('unconfigured')
+          return
+        }
+
+        const aiModules = sortRibbonModulesForExecution(
+          enabledModules.filter((module) => module.type !== 'rag' && module.type !== 'quick'),
+        )
+        const batchModules = aiModules.filter((module) => canBatchGenerateEchoesForModule(module))
+        const singleModules = aiModules.filter((module) => !canBatchGenerateEchoesForModule(module))
+
+        void (async () => {
+          const runQueuedModules = async (queuedModules: RibbonModuleConfig[]) => {
+            const queue = [...queuedModules]
+            const workerCount = Math.min(RIBBON_BACKGROUND_CONCURRENCY, queue.length)
+
+            await Promise.all(
+              Array.from({ length: workerCount }, async () => {
+                while (queue.length > 0) {
+                  if (refreshRequestIdRef.current !== snapshot.id) return
+                  const nextModule = queue.shift()
+                  if (!nextModule) return
+                  await runBackgroundModule(
+                    snapshot.id,
+                    documentId,
+                    slotCount,
+                    trimmed,
+                    stableEchoes,
+                    nextModule,
+                  )
+                }
+              }),
+            )
+          }
+
+          const tasks: Array<Promise<void>> = []
+
+          if (batchModules.length >= 2) {
+            tasks.push(
+              runBackgroundModuleBatch(
+                snapshot.id,
+                documentId,
+                slotCount,
+                trimmed,
+                stableEchoes,
+                batchModules,
+              ).catch((err) => {
+                devLog.push('ribbon', 'background ai batch fallback to single-module queue', {
+                  snapshotId: snapshot.id,
+                  modules: batchModules.map((module) => module.id),
+                  error: (err as Error)?.message ?? 'unknown',
+                })
+                return runQueuedModules(batchModules)
+              }),
+            )
+          } else if (batchModules.length === 1) {
+            singleModules.unshift(batchModules[0])
+          }
+
+          if (singleModules.length > 0) {
+            tasks.push(runQueuedModules(singleModules))
+          }
+
+          await Promise.all(tasks)
+        })()
+      } catch (err) {
+        setAiStatus(hasApiKey ? 'error' : 'unconfigured')
+        const msg = (err as Error).message
+        if (msg === 'API_KEY_INVALID') {
+          throttledErrorToast('auth', 'API Key 鏃犳晥鎴栧凡杩囨湡锛岃鍦ㄨ缃腑鏇存柊')
+        } else if (msg === 'RATE_LIMITED') {
+          throttledErrorToast('rate', 'AI 璇锋眰棰戠巼瓒呴檺锛岃绋嶅悗鍐嶈瘯')
+        } else if (msg === 'NETWORK_TIMEOUT') {
+          throttledErrorToast('timeout', '杩炴帴瓒呮椂锛岃妫€鏌ョ綉缁滄垨 Base URL')
+        } else {
+          throttledErrorToast('generic', msg.length > 60 ? '回声刷新失败，请检查当前配置' : msg)
+        }
+      } finally {
+        refreshAbortRef.current = null
+      }
+    },
+    [
+      cancelActiveRibbonJobs,
+      documentId,
+      hasApiKey,
+      renderedRibbonSlots,
+      ribbonRestoreFrozen,
+      runBackgroundModule,
+      runBackgroundModuleBatch,
+      settings,
+      throttledErrorToast,
+    ],
+  )
 
   const pauseMs = Math.min(10, Math.max(1, settings.ribbonPauseSeconds ?? 2)) * 1000
   const { beat, stop: stopHeartbeat } = useHeartbeat({
@@ -1263,23 +1592,27 @@ export default function Home() {
     onPause: handlePause,
   })
 
-  const handleEditorUpdate = useCallback((text: string, blockId: string | null) => {
-    const prevText = lastTextRef.current
-    if (suppressNextEditorBeatRef.current) {
-      suppressNextEditorBeatRef.current = false
-      lastTextRef.current = text
-      currentBlockIdRef.current = blockId
-      setCurrentBlockId(blockId)
-      return
-    }
+  const handleEditorUpdate = useCallback(
+    (text: string, _blockId: string | null) => {
+      const prevText = lastTextRef.current
+      if (suppressNextEditorBeatRef.current) {
+        suppressNextEditorBeatRef.current = false
+        lastTextRef.current = text
+        return
+      }
 
-    lastTextRef.current = text
+      lastTextRef.current = text
+      if (text !== prevText && text.trim().length >= 2) {
+        beat(text)
+      }
+    },
+    [beat],
+  )
+
+  const handleActiveBlockChange = useCallback((blockId: string | null) => {
     currentBlockIdRef.current = blockId
     setCurrentBlockId(blockId)
-    if (text !== prevText && text.trim().length >= 2) {
-      beat(text)
-    }
-  }, [beat])
+  }, [])
 
   const saveDocument = useCallback(() => {
     if (!documentId) return
@@ -1313,7 +1646,10 @@ export default function Home() {
     const doc = documentStorage.get(id)
     if (doc) {
       suppressNextEditorBeatRef.current = true
-      const loaded = filterEchoesForKnowledgeBase(flowHistory.load(doc.id), knowledgeBaseService.getActive())
+      const loaded = filterEchoesForKnowledgeBase(
+        flowHistory.load(doc.id),
+        knowledgeBaseService.getActive(),
+      )
       try {
         const savedDocId = localStorage.getItem(DISPLAY_ECHOES_DOC_ID_KEY)
         const savedEchoes = localStorage.getItem(DISPLAY_ECHOES_KEY)
@@ -1321,15 +1657,15 @@ export default function Home() {
         if (savedHomeUi) {
           const parsedUi = JSON.parse(savedHomeUi) as {
             documentId?: string
-            writingPanelOpen?: boolean
-            writingPanelTab?: TabKey
             selectedRibbonEchoId?: string | null
             ribbonSlots?: unknown
           }
           if (parsedUi.documentId === doc.id) {
             const restoredSlots =
               normalizeStoredRibbonSlots(parsedUi.ribbonSlots, ribbonSlotCount) ??
-              (savedDocId === doc.id && savedEchoes ? normalizeStoredRibbonSlots(JSON.parse(savedEchoes), ribbonSlotCount) : null)
+              (savedDocId === doc.id && savedEchoes
+                ? normalizeStoredRibbonSlots(JSON.parse(savedEchoes), ribbonSlotCount)
+                : null)
             if (restoredSlots && restoredSlots.some((item) => item !== null)) {
               setRestoredRibbonSlots(restoredSlots)
               setRestoredRibbonDocId(doc.id)
@@ -1339,12 +1675,11 @@ export default function Home() {
                 slotCount: ribbonSlotCount,
               })
             }
-            setWritingPanelOpen(parsedUi.writingPanelOpen ?? true)
-            setWritingPanelTab(parsedUi.writingPanelTab ?? 'today')
             const selectedItem =
               restoredSlots?.find((item) => item?.id === parsedUi.selectedRibbonEchoId) ?? null
             setSelectedRibbonEcho(selectedItem)
             selectedRibbonEchoRef.current = selectedItem
+            setContextPanelMode(selectedItem ? 'echo' : null)
           }
         }
       } catch {
@@ -1363,29 +1698,24 @@ export default function Home() {
       setRestoredRibbonSlots(null)
       setRestoredRibbonDocId(null)
       setRibbonRestoreFrozen(false)
-      setWritingPanelOpen(true)
-      setWritingPanelTab('today')
       setSelectedRibbonEcho(null)
+      setContextPanelMode(null)
       skipNextKnowledgeHydrateRef.current = id
       setDocumentId(id)
-      setTitle('鏃犻')
-      setContent('')
-      const created: Document = {
-        id,
-        title: '鏃犻',
-        content: '',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }
+      const created = buildBuiltinGuideDocument(id, new Date().toISOString())
+      setTitle(created.title)
+      setContent(created.content)
       documentStorage.save(created)
       documentStorage.setLastDocumentId(id)
       setEchoes([])
       setRibbonState(ribbonEngine.hydrate([], ribbonSlotCount, id))
+      lastTextRef.current = created.content
+      lastRefreshedTextRef.current = created.content
     }
   }, [ribbonSlotCount])
 
   const handleContentChange = useCallback((html: string) => {
-    setContent(html)
+    setContent((prev) => (prev === html ? prev : html))
   }, [])
 
   const handleManualSave = useCallback(() => {
@@ -1397,75 +1727,49 @@ export default function Home() {
     handlePause(lastTextRef.current)
   }, [handlePause])
 
-  const handleSensoryZoom = useCallback(async () => {
-    if (!settings.sensoryZoomEnabled) return
-    if (sensoryZoomResults && sensoryZoomResults.length > 0) {
-      setSensoryZoomResults(null)
-      return
-    }
-    const baseText = selectionText.trim() || paragraphTextRef.current.trim() || lastTextRef.current.trim()
-    if (!baseText) return
-    const base = knowledgeBaseService.getActive()
-    if (!base?.id) {
-      toast.error('请先选择知识库')
-      return
-    }
-    setSensoryZoomLoading(true)
-    setShowClichePopover(false)
-    setSensoryZoomResults(null)
-    try {
-      const items = await expandSensoryZoom(baseText, content, base.id, settings)
-      setSensoryZoomResults(items)
-    } catch {
-      toast.error('感官放大失败')
-    } finally {
-      setSensoryZoomLoading(false)
-    }
-  }, [content, selectionText, sensoryZoomResults, settings])
-
   const runClicheDetection = useRef(
     debounce(() => {
       const text = paragraphTextRef.current
       if (!clicheEnabledRef.current) {
+        debugCliche('cliche-detect', 'skipped', {
+          reason: 'disabled',
+          paragraphLength: text.trim().length,
+        })
         setClicheMatches([])
         setParagraphForCliche('')
+        setClicheReview(null)
+        setClicheReviewLoading(false)
         return
       }
+      const matches = detectCliches(text)
+      debugCliche('cliche-detect', 'completed', {
+        paragraphLength: text.trim().length,
+        matchCount: matches.length,
+        phrases: matches.map((item) => item.phrase).slice(0, 6),
+      })
       setParagraphForCliche(text)
-      setClicheMatches(detectCliches(text))
+      setClicheMatches(matches)
     }, 600),
   ).current
 
-  const handleParagraphChangeFromEditor = useCallback((paragraphText: string) => {
-    paragraphTextRef.current = paragraphText
-    setCurrentParagraph(paragraphText)
-    runClicheDetection()
-  }, [runClicheDetection])
+  const handleParagraphChangeFromEditor = useCallback(
+    (paragraphText: string, from: number, to: number) => {
+      paragraphTextRef.current = paragraphText
+      setCurrentParagraph(paragraphText)
+      setCurrentParagraphRange({ from, to })
+      debugCliche('cliche-detect', 'paragraph changed', {
+        currentBlockId: currentBlockIdRef.current,
+        from,
+        to,
+        paragraphLength: paragraphText.trim().length,
+        preview: paragraphText.trim().slice(0, 80),
+      })
+      runClicheDetection()
+    },
+    [runClicheDetection],
+  )
 
-  const handleClicheAlternatives = useCallback(async () => {
-    const base = knowledgeBaseService.getActive()
-    if (!base?.id) {
-      toast.error('请先选择知识库')
-      return
-    }
-    const query = (paragraphForCliche.trim().slice(0, 200) || clicheMatches[0]?.phrase) ?? ''
-    if (!query) return
-    setSensoryZoomResults(null)
-    setShowClichePopover(true)
-    setClicheAlternativesLoading(true)
-    setClicheAlternatives([])
-    try {
-      const candidates = await generateCandidatesByViews(query, { knowledgeBaseId: base.id })
-      const items = candidates.slice(0, 5).map(({ baseScore: _b, finalScore: _f, ...item }) => item as EchoItem)
-      setClicheAlternatives(items)
-    } catch {
-      toast.error('获取替代表达失败')
-    } finally {
-      setClicheAlternativesLoading(false)
-    }
-  }, [clicheMatches, paragraphForCliche])
-
-  const handleCaptureSelection = useCallback(() => {
+  const _handleCaptureSelection = useCallback(() => {
     const text = selectionText.trim()
     if (!documentId || !text) return
     setWorkspace(
@@ -1483,7 +1787,7 @@ export default function Home() {
     toast.success('宸叉敹杩涚礌鏉愮')
   }, [currentScene?.id, documentId, selectionText])
 
-  const handleCaptureEcho = useCallback(() => {
+  const _handleCaptureEcho = useCallback(() => {
     if (!documentId || !selectedRibbonEcho) return
     const content = (selectedRibbonEcho.originalText ?? selectedRibbonEcho.content ?? '').trim()
     setWorkspace(
@@ -1502,142 +1806,168 @@ export default function Home() {
     toast.success('宸叉敹杩涚礌鏉愮')
   }, [currentScene?.id, documentId, selectedRibbonEcho])
 
-  const handleCaptureRibbonEcho = useCallback((item: EchoItem) => {
-    if (!documentId) return
-    const content = (item.originalText ?? item.content ?? '').trim()
-    if (!content) return
-    setWorkspace(
-      writingWorkspaceStorage.addMaterial(documentId, {
-        kind: 'echo',
-        content,
-        source: item.source,
-        note: item.content,
-        tags: item.tag ? [item.tag] : [],
+  const _handleCaptureRibbonEcho = useCallback(
+    (item: EchoItem) => {
+      if (!documentId) return
+      const content = (item.originalText ?? item.content ?? '').trim()
+      if (!content) return
+      setWorkspace(
+        writingWorkspaceStorage.addMaterial(documentId, {
+          kind: 'echo',
+          content,
+          source: item.source,
+          note: item.content,
+          tags: item.tag ? [item.tag] : [],
+          sceneId: currentScene?.id ?? null,
+          blockId: currentBlockIdRef.current,
+          contextExcerpt: summarizeRevisionContext(content),
+          status: currentScene?.id ? 'queued' : 'inbox',
+        }),
+      )
+      toast.success(currentScene?.id ? '已收入当前场景待用素材' : '已收入素材箱')
+    },
+    [currentScene?.id, documentId],
+  )
+
+  const _handleCreateRevisionFromEcho = useCallback(
+    (item: EchoItem) => {
+      if (!documentId) return
+      const raw = (item.detailText ?? item.originalText ?? item.content ?? '').trim()
+      if (!raw) return
+      const title =
+        item.moduleLabel?.trim() ||
+        item.source?.trim() ||
+        item.tag?.trim() ||
+        raw.slice(0, 24) ||
+        '来自回声的修订'
+      const next = writingWorkspaceStorage.addRevision(documentId, {
+        title,
+        detail: raw,
+        kind: item.source?.toLowerCase().includes('ai') ? 'plot' : 'manual',
+        priority: 'soon',
+        tags: [item.tag, item.moduleLabel, item.source].filter(Boolean) as string[],
+        contextExcerpt: summarizeRevisionContext(raw),
+        blockId: item.blockId ?? currentBlockIdRef.current,
+      })
+      setWorkspace(next)
+      toast.success('宸查€佸叆淇娓呭崟')
+    },
+    [documentId],
+  )
+
+  const _handleConvertEchoToMemory = useCallback(
+    (item: EchoItem) => {
+      if (!documentId) return
+      const raw = (item.detailText ?? item.originalText ?? item.content ?? '').trim()
+      if (!raw) return
+      const inferredType =
+        item.tag?.includes('鎰忚薄') || item.source?.toLowerCase().includes('imagery')
+          ? 'imagery'
+          : item.tag?.includes('鏃堕棿')
+            ? 'timeline'
+            : item.tag?.includes('鍏崇郴')
+              ? 'relationship'
+              : 'motif'
+
+      const next = writingWorkspaceStorage.addMemoryNode(documentId, {
+        type: inferredType,
+        title:
+          item.moduleLabel?.trim() || item.tag?.trim() || item.source?.trim() || raw.slice(0, 18),
+        detail: raw,
         sceneId: currentScene?.id ?? null,
-        blockId: currentBlockIdRef.current,
-        contextExcerpt: summarizeRevisionContext(content),
-        status: currentScene?.id ? 'queued' : 'inbox',
-      }),
-    )
-    toast.success(currentScene?.id ? '已收入当前场景待用素材' : '已收入素材箱')
-  }, [currentScene?.id, documentId])
+        blockId: item.blockId ?? currentBlockIdRef.current,
+        source: `echo:${item.moduleId ?? item.source ?? 'unknown'}`,
+      })
+      setWorkspace(next)
+      toast.success('已转入作者记忆')
+    },
+    [currentScene?.id, documentId],
+  )
 
-  const handleCreateRevisionFromEcho = useCallback((item: EchoItem) => {
-    if (!documentId) return
-    const raw = (item.detailText ?? item.originalText ?? item.content ?? '').trim()
-    if (!raw) return
-    const title =
-      item.moduleLabel?.trim() ||
-      item.source?.trim() ||
-      item.tag?.trim() ||
-      raw.slice(0, 24) ||
-      '来自回声的修订'
-    const next = writingWorkspaceStorage.addRevision(documentId, {
-      title,
-      detail: raw,
-      kind: item.source?.toLowerCase().includes('ai') ? 'plot' : 'manual',
-      priority: 'soon',
-      tags: [item.tag, item.moduleLabel, item.source].filter(Boolean) as string[],
-      contextExcerpt: summarizeRevisionContext(raw),
-      blockId: item.blockId ?? currentBlockIdRef.current,
-    })
-    setWorkspace(next)
-    toast.success('宸查€佸叆淇娓呭崟')
-  }, [documentId])
+  const _handleUpdateMaterialTags = useCallback(
+    (materialId: string, tags: string[]) => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.updateMaterial(documentId, materialId, { tags }))
+    },
+    [documentId],
+  )
 
-  const handleConvertEchoToMemory = useCallback((item: EchoItem) => {
-    if (!documentId) return
-    const raw = (item.detailText ?? item.originalText ?? item.content ?? '').trim()
-    if (!raw) return
-    const inferredType =
-      item.tag?.includes('鎰忚薄') || item.source?.toLowerCase().includes('imagery')
-        ? 'imagery'
-        : item.tag?.includes('鏃堕棿')
-          ? 'timeline'
-          : item.tag?.includes('鍏崇郴')
-            ? 'relationship'
-            : 'motif'
+  const _handleAssignMaterialToCurrentScene = useCallback(
+    (materialId: string) => {
+      if (!documentId) return
+      if (!currentScene) {
+        toast.error('当前还没有场景卡，暂时无法挂载素材')
+        return
+      }
+      setWorkspace(
+        writingWorkspaceStorage.updateMaterial(documentId, materialId, {
+          sceneId: currentScene.id,
+          blockId: currentBlockIdRef.current,
+          contextExcerpt: summarizeRevisionContext(currentParagraph || lastTextRef.current),
+          status: 'queued',
+        }),
+      )
+      toast.success('已挂到当前场景')
+    },
+    [currentParagraph, currentScene, documentId],
+  )
 
-    const next = writingWorkspaceStorage.addMemoryNode(documentId, {
-      type: inferredType,
-      title: item.moduleLabel?.trim() || item.tag?.trim() || item.source?.trim() || raw.slice(0, 18),
-      detail: raw,
-      sceneId: currentScene?.id ?? null,
-      blockId: item.blockId ?? currentBlockIdRef.current,
-      source: `echo:${item.moduleId ?? item.source ?? 'unknown'}`,
-    })
-    setWorkspace(next)
-    toast.success('已转入作者记忆')
-  }, [currentScene?.id, documentId])
+  const _handleUpdateMaterialStatus = useCallback(
+    (materialId: string, status: MaterialStatus) => {
+      if (!documentId) return
+      setWorkspace(
+        writingWorkspaceStorage.updateMaterial(documentId, materialId, {
+          status,
+          usedAt: status === 'used' ? new Date().toISOString() : undefined,
+        }),
+      )
+    },
+    [documentId],
+  )
 
-  const handleUpdateMaterialTags = useCallback((materialId: string, tags: string[]) => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.updateMaterial(documentId, materialId, { tags }))
-  }, [documentId])
+  const _handleMoveMaterialToInbox = useCallback(
+    (materialId: string) => {
+      if (!documentId) return
+      setWorkspace(
+        writingWorkspaceStorage.updateMaterial(documentId, materialId, {
+          sceneId: null,
+          status: 'inbox',
+          usedAt: undefined,
+        }),
+      )
+    },
+    [documentId],
+  )
 
-  const handleAssignMaterialToCurrentScene = useCallback((materialId: string) => {
-    if (!documentId) return
-    if (!currentScene) {
-      toast.error('当前还没有场景卡，暂时无法挂载素材')
-      return
-    }
-    setWorkspace(
-      writingWorkspaceStorage.updateMaterial(documentId, materialId, {
-        sceneId: currentScene.id,
-        blockId: currentBlockIdRef.current,
-        contextExcerpt: summarizeRevisionContext(currentParagraph || lastTextRef.current),
-        status: 'queued',
-      }),
-    )
-    toast.success('已挂到当前场景')
-  }, [currentParagraph, currentScene, documentId])
+  const _handleLinkMaterialToRevision = useCallback(
+    (materialId: string) => {
+      if (!documentId) return
+      const material = workspace.materials.find((item) => item.id === materialId)
+      if (!material) return
+      const next = writingWorkspaceStorage.addRevision(documentId, {
+        title:
+          material.note?.trim() || material.content.trim().slice(0, 24) || '浠庣礌鏉愮敓鎴愮殑淇',
+        detail: material.content.trim(),
+        kind: 'manual',
+        priority: 'soon',
+        tags: material.tags,
+        contextExcerpt: material.contextExcerpt ?? summarizeRevisionContext(material.content),
+        blockId: material.blockId ?? currentBlockIdRef.current,
+      })
+      setWorkspace(next)
+      toast.success('宸查€佸叆淇娓呭崟')
+    },
+    [documentId, workspace.materials],
+  )
 
-  const handleUpdateMaterialStatus = useCallback((materialId: string, status: MaterialStatus) => {
-    if (!documentId) return
-    setWorkspace(
-      writingWorkspaceStorage.updateMaterial(documentId, materialId, {
-        status,
-        usedAt: status === 'used' ? new Date().toISOString() : undefined,
-      }),
-    )
-  }, [documentId])
+  const _handleConvertMaterialToMemory = useCallback(
+    (materialId: string) => {
+      if (!documentId) return
+      const material = workspace.materials.find((item) => item.id === materialId)
+      if (!material || !material.content.trim()) return
 
-  const handleMoveMaterialToInbox = useCallback((materialId: string) => {
-    if (!documentId) return
-    setWorkspace(
-      writingWorkspaceStorage.updateMaterial(documentId, materialId, {
-        sceneId: null,
-        status: 'inbox',
-        usedAt: undefined,
-      }),
-    )
-  }, [documentId])
-
-  const handleLinkMaterialToRevision = useCallback((materialId: string) => {
-    if (!documentId) return
-    const material = workspace.materials.find((item) => item.id === materialId)
-    if (!material) return
-    const next = writingWorkspaceStorage.addRevision(documentId, {
-      title: material.note?.trim() || material.content.trim().slice(0, 24) || '浠庣礌鏉愮敓鎴愮殑淇',
-      detail: material.content.trim(),
-      kind: 'manual',
-      priority: 'soon',
-      tags: material.tags,
-      contextExcerpt: material.contextExcerpt ?? summarizeRevisionContext(material.content),
-      blockId: material.blockId ?? currentBlockIdRef.current,
-    })
-    setWorkspace(next)
-    toast.success('宸查€佸叆淇娓呭崟')
-  }, [documentId, workspace.materials])
-
-  const handleConvertMaterialToMemory = useCallback((materialId: string) => {
-    if (!documentId) return
-    const material = workspace.materials.find((item) => item.id === materialId)
-    if (!material || !material.content.trim()) return
-
-    const loweredTags = material.tags.map((tag) => tag.toLowerCase())
-    const inferredType =
-      material.characterName
+      const loweredTags = material.tags.map((tag) => tag.toLowerCase())
+      const inferredType = material.characterName
         ? 'character'
         : loweredTags.some((tag) => tag.includes('鍏崇郴'))
           ? 'relationship'
@@ -1647,29 +1977,38 @@ export default function Home() {
               ? 'timeline'
               : 'motif'
 
-    const next = writingWorkspaceStorage.addMemoryNode(documentId, {
-      type: inferredType,
-      title: material.characterName || material.note?.trim() || material.content.trim().slice(0, 18),
-      detail: material.content.trim(),
-      sceneId: material.sceneId ?? currentScene?.id ?? null,
-      blockId: material.blockId ?? currentBlockIdRef.current,
-      source: `material:${material.kind}`,
-    })
-    setWorkspace(next)
-    toast.success('已转入作者记忆')
-  }, [currentScene?.id, documentId, workspace.materials])
+      const next = writingWorkspaceStorage.addMemoryNode(documentId, {
+        type: inferredType,
+        title:
+          material.characterName || material.note?.trim() || material.content.trim().slice(0, 18),
+        detail: material.content.trim(),
+        sceneId: material.sceneId ?? currentScene?.id ?? null,
+        blockId: material.blockId ?? currentBlockIdRef.current,
+        source: `material:${material.kind}`,
+      })
+      setWorkspace(next)
+      toast.success('已转入作者记忆')
+    },
+    [currentScene?.id, documentId, workspace.materials],
+  )
 
-  const handleRemoveMaterial = useCallback((materialId: string) => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.removeMaterial(documentId, materialId))
-  }, [documentId])
+  const _handleRemoveMaterial = useCallback(
+    (materialId: string) => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.removeMaterial(documentId, materialId))
+    },
+    [documentId],
+  )
 
-  const handleUpdateRevisionStatus = useCallback((revisionId: string, status: 'open' | 'done') => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.updateRevision(documentId, revisionId, { status }))
-  }, [documentId])
+  const _handleUpdateRevisionStatus = useCallback(
+    (revisionId: string, status: 'open' | 'done') => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.updateRevision(documentId, revisionId, { status }))
+    },
+    [documentId],
+  )
 
-  const handleFocusRevisionBlock = useCallback((revision: RevisionTask) => {
+  const _handleFocusRevisionBlock = useCallback((revision: RevisionTask) => {
     if (!revision.blockId) {
       toast.error('杩欐潯淇杩樻病鏈夌粦瀹氬埌鍏蜂綋娈佃惤')
       return
@@ -1680,17 +2019,22 @@ export default function Home() {
     }
   }, [])
 
-  const handleRemoveRevision = useCallback((revisionId: string) => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.removeRevision(documentId, revisionId))
-  }, [documentId])
+  const _handleRemoveRevision = useCallback(
+    (revisionId: string) => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.removeRevision(documentId, revisionId))
+    },
+    [documentId],
+  )
 
-  const handleAddSceneFromCurrent = useCallback(() => {
+  const _handleAddSceneFromCurrent = useCallback(() => {
     const summary = currentParagraph.trim() || selectionText.trim()
     if (!documentId || !summary) return
     const blockId = currentBlockIdRef.current
     const contextExcerpt = summarizeRevisionContext(summary)
-    const existingScene = blockId ? workspace.scenes.find((scene) => scene.blockId === blockId) : null
+    const existingScene = blockId
+      ? workspace.scenes.find((scene) => scene.blockId === blockId)
+      : null
     const orderedScenes = workspace.scenes.slice().sort((a, b) => a.order - b.order)
     const fallbackChapterTitle =
       currentScene?.chapterTitle?.trim() ||
@@ -1719,201 +2063,246 @@ export default function Home() {
     toast.success(existingScene ? '宸叉洿鏂板綋鍓嶅満鏅崱' : '宸茬敓鎴愬綋鍓嶅満鏅崱')
   }, [currentParagraph, currentScene?.chapterTitle, documentId, selectionText, workspace.scenes])
 
-  const handleUpdateScene = useCallback((
-    sceneId: string,
-    updates: Partial<{
-      chapterTitle: string
+  const _handleUpdateScene = useCallback(
+    (
+      sceneId: string,
+      updates: Partial<{
+        chapterTitle: string
+        title: string
+        summary: string
+        goal: string
+        tension: string
+        order: number
+        blockId: string | null
+        contextExcerpt: string
+        lastReviewedAt: string
+      }>,
+    ) => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.updateScene(documentId, sceneId, updates))
+    },
+    [documentId],
+  )
+
+  const _handleRemoveScene = useCallback(
+    (sceneId: string) => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.removeScene(documentId, sceneId))
+    },
+    [documentId],
+  )
+
+  const _handleAddCharacterWatch = useCallback(
+    (input: {
       title: string
-      summary: string
-      goal: string
-      tension: string
-      order: number
-      blockId: string | null
-      contextExcerpt: string
-      lastReviewedAt: string
-    }>,
-  ) => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.updateScene(documentId, sceneId, updates))
-  }, [documentId])
+      characterName?: string
+      detail: string
+      sceneId?: string | null
+      blockId?: string | null
+    }) => {
+      if (!documentId || !input.title.trim() || !input.detail.trim()) return
+      const next = writingWorkspaceStorage.addCharacterWatch(documentId, {
+        title: input.title.trim(),
+        characterName: input.characterName?.trim() || undefined,
+        detail: input.detail.trim(),
+        sceneId: input.sceneId ?? currentScene?.id ?? null,
+        blockId: input.blockId ?? currentBlockIdRef.current,
+      })
+      setWorkspace(next)
+      toast.success('宸茶涓轰汉鐗╂敞鎰忕偣')
+    },
+    [currentScene?.id, documentId],
+  )
 
-  const handleRemoveScene = useCallback((sceneId: string) => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.removeScene(documentId, sceneId))
-  }, [documentId])
+  const _handleUpdateCharacterWatchStatus = useCallback(
+    (watchId: string, status: CharacterWatchStatus) => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.updateCharacterWatch(documentId, watchId, { status }))
+    },
+    [documentId],
+  )
 
-  const handleAddCharacterWatch = useCallback((input: {
-    title: string
-    characterName?: string
-    detail: string
-    sceneId?: string | null
-    blockId?: string | null
-  }) => {
-    if (!documentId || !input.title.trim() || !input.detail.trim()) return
-    const next = writingWorkspaceStorage.addCharacterWatch(documentId, {
-      title: input.title.trim(),
-      characterName: input.characterName?.trim() || undefined,
-      detail: input.detail.trim(),
-      sceneId: input.sceneId ?? currentScene?.id ?? null,
-      blockId: input.blockId ?? currentBlockIdRef.current,
-    })
-    setWorkspace(next)
-    toast.success('宸茶涓轰汉鐗╂敞鎰忕偣')
-  }, [currentScene?.id, documentId])
+  const _handleRemoveCharacterWatch = useCallback(
+    (watchId: string) => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.removeCharacterWatch(documentId, watchId))
+    },
+    [documentId],
+  )
 
-  const handleUpdateCharacterWatchStatus = useCallback((watchId: string, status: CharacterWatchStatus) => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.updateCharacterWatch(documentId, watchId, { status }))
-  }, [documentId])
+  const _handleAddMemoryNode = useCallback(
+    (input: {
+      type: 'character' | 'relationship' | 'motif' | 'imagery' | 'timeline'
+      title: string
+      detail?: string
+      sceneId?: string | null
+      blockId?: string | null
+      source?: string
+    }) => {
+      if (!documentId || !input.title.trim()) return
+      const next = writingWorkspaceStorage.addMemoryNode(documentId, {
+        type: input.type,
+        title: input.title.trim(),
+        detail: input.detail?.trim(),
+        sceneId: input.sceneId ?? currentScene?.id ?? null,
+        blockId: input.blockId ?? currentBlockIdRef.current,
+        source: input.source ?? 'manual',
+      })
+      setWorkspace(next)
+    },
+    [currentScene?.id, documentId],
+  )
 
-  const handleRemoveCharacterWatch = useCallback((watchId: string) => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.removeCharacterWatch(documentId, watchId))
-  }, [documentId])
+  const _handleRemoveMemoryNode = useCallback(
+    (nodeId: string) => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.removeMemoryNode(documentId, nodeId))
+    },
+    [documentId],
+  )
 
-  const handleAddMemoryNode = useCallback((input: {
-    type: 'character' | 'relationship' | 'motif' | 'imagery' | 'timeline'
-    title: string
-    detail?: string
-    sceneId?: string | null
-    blockId?: string | null
-    source?: string
-  }) => {
-    if (!documentId || !input.title.trim()) return
-    const next = writingWorkspaceStorage.addMemoryNode(documentId, {
-      type: input.type,
-      title: input.title.trim(),
-      detail: input.detail?.trim(),
-      sceneId: input.sceneId ?? currentScene?.id ?? null,
-      blockId: input.blockId ?? currentBlockIdRef.current,
-      source: input.source ?? 'manual',
-    })
-    setWorkspace(next)
-  }, [currentScene?.id, documentId])
+  const _handleAddPracticeDrill = useCallback(
+    (input: {
+      title: string
+      detail: string
+      focus?: string
+      sceneId?: string | null
+      blockId?: string | null
+    }) => {
+      if (!documentId || !input.title.trim() || !input.detail.trim()) return
+      const next = writingWorkspaceStorage.addPracticeDrill(documentId, {
+        title: input.title.trim(),
+        detail: input.detail.trim(),
+        focus: input.focus?.trim() || undefined,
+        sceneId: input.sceneId ?? currentScene?.id ?? null,
+        blockId: input.blockId ?? currentBlockIdRef.current,
+      })
+      setWorkspace(next)
+      toast.success('宸插姞鍏ョ粌涔犳祦')
+    },
+    [currentScene?.id, documentId],
+  )
 
-  const handleRemoveMemoryNode = useCallback((nodeId: string) => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.removeMemoryNode(documentId, nodeId))
-  }, [documentId])
+  const _handleUpdatePracticeDrillStatus = useCallback(
+    (drillId: string, status: PracticeDrillStatus) => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.updatePracticeDrill(documentId, drillId, { status }))
+    },
+    [documentId],
+  )
 
-  const handleAddPracticeDrill = useCallback((input: {
-    title: string
-    detail: string
-    focus?: string
-    sceneId?: string | null
-    blockId?: string | null
-  }) => {
-    if (!documentId || !input.title.trim() || !input.detail.trim()) return
-    const next = writingWorkspaceStorage.addPracticeDrill(documentId, {
-      title: input.title.trim(),
-      detail: input.detail.trim(),
-      focus: input.focus?.trim() || undefined,
-      sceneId: input.sceneId ?? currentScene?.id ?? null,
-      blockId: input.blockId ?? currentBlockIdRef.current,
-    })
-    setWorkspace(next)
-    toast.success('宸插姞鍏ョ粌涔犳祦')
-  }, [currentScene?.id, documentId])
+  const _handleRemovePracticeDrill = useCallback(
+    (drillId: string) => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.removePracticeDrill(documentId, drillId))
+    },
+    [documentId],
+  )
 
-  const handleUpdatePracticeDrillStatus = useCallback((drillId: string, status: PracticeDrillStatus) => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.updatePracticeDrill(documentId, drillId, { status }))
-  }, [documentId])
+  const _handleRestoreSnapshot = useCallback(
+    (snapshot: DocumentSnapshot) => {
+      if (!documentId) return
+      stopHeartbeat()
+      suppressNextEditorBeatRef.current = true
+      setTitle(snapshot.title || '未命名')
+      setContent(snapshot.content)
+      setEditorContentVersion((value) => value + 1)
+      const plain = writingWorkspaceStorage.plainTextFromHtml(snapshot.content)
+      lastTextRef.current = plain
+      lastRefreshedTextRef.current = plain
+      documentStorage.save({
+        id: documentId,
+        title: snapshot.title || '未命名',
+        content: snapshot.content,
+        createdAt: documentStorage.get(documentId)?.createdAt ?? new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+      toast.success('已恢复到该快照')
+    },
+    [documentId, stopHeartbeat],
+  )
 
-  const handleRemovePracticeDrill = useCallback((drillId: string) => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.removePracticeDrill(documentId, drillId))
-  }, [documentId])
+  const _handleRemoveSnapshot = useCallback(
+    (snapshotId: string) => {
+      if (!documentId) return
+      setWorkspace(writingWorkspaceStorage.removeSnapshot(documentId, snapshotId))
+    },
+    [documentId],
+  )
 
-  const handleRestoreSnapshot = useCallback((snapshot: DocumentSnapshot) => {
-    if (!documentId) return
-    stopHeartbeat()
-    suppressNextEditorBeatRef.current = true
-    setTitle(snapshot.title || '未命名')
-    setContent(snapshot.content)
-    setEditorContentVersion((value) => value + 1)
-    const plain = writingWorkspaceStorage.plainTextFromHtml(snapshot.content)
-    lastTextRef.current = plain
-    lastRefreshedTextRef.current = plain
-    documentStorage.save({
-      id: documentId,
-      title: snapshot.title || '未命名',
-      content: snapshot.content,
-      createdAt: documentStorage.get(documentId)?.createdAt ?? new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    })
-    toast.success('已恢复到该快照')
-  }, [documentId, stopHeartbeat])
+  const handleOpenDocument = useCallback(
+    (id: string) => {
+      stopHeartbeat()
+      saveDocumentRef.current()
+      const doc = documentStorage.get(id)
+      if (!doc) return
 
-  const handleRemoveSnapshot = useCallback((snapshotId: string) => {
-    if (!documentId) return
-    setWorkspace(writingWorkspaceStorage.removeSnapshot(documentId, snapshotId))
-  }, [documentId])
-
-  const handleOpenDocument = useCallback((id: string) => {
-    stopHeartbeat()
-    saveDocumentRef.current()
-    const doc = documentStorage.get(id)
-    if (!doc) return
-
-    suppressNextEditorBeatRef.current = true
-    documentStorage.setLastDocumentId(id)
-    const loaded = filterEchoesForKnowledgeBase(flowHistory.load(doc.id), knowledgeBaseService.getActive())
-    skipNextKnowledgeHydrateRef.current = doc.id
-    setDocumentId(doc.id)
-    setTitle(doc.title || '鏃犻')
-    setContent(doc.content || '')
-    setEchoes(loaded)
-    setRibbonState(ribbonEngine.hydrate(loaded, Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as RibbonSlotCount, doc.id))
-    try {
-      const savedEchoes = localStorage.getItem(DISPLAY_ECHOES_KEY)
-      const savedEchoDocId = localStorage.getItem(DISPLAY_ECHOES_DOC_ID_KEY)
-      if (savedEchoDocId === doc.id && savedEchoes) {
-        const parsed = JSON.parse(savedEchoes)
-        const restoredSlots = normalizeStoredRibbonSlots(parsed, ribbonSlotCount)
-        if (restoredSlots && restoredSlots.some((item) => item !== null)) {
-          setRestoredRibbonSlots(restoredSlots)
-          setRestoredRibbonDocId(doc.id)
-          setRibbonRestoreFrozen(true)
-        }
-      } else {
-        setRestoredRibbonSlots(null)
-        setRestoredRibbonDocId(null)
-        setRibbonRestoreFrozen(false)
-      }
-
-      const savedHomeUi = localStorage.getItem(HOME_UI_STATE_KEY)
-      if (savedHomeUi) {
-        const parsedUi = JSON.parse(savedHomeUi) as {
-          documentId?: string
-          writingPanelOpen?: boolean
-          writingPanelTab?: TabKey
-          selectedRibbonEchoId?: string | null
-          ribbonSlots?: unknown
-        }
-        if (parsedUi.documentId === doc.id) {
-          setWritingPanelOpen(parsedUi.writingPanelOpen ?? true)
-          setWritingPanelTab(parsedUi.writingPanelTab ?? 'today')
-          const restoredSlots = normalizeStoredRibbonSlots(parsedUi.ribbonSlots, ribbonSlotCount)
-          const selectedItem =
-            restoredSlots?.find((item) => item?.id === parsedUi.selectedRibbonEchoId) ?? null
-          setSelectedRibbonEcho(selectedItem)
-          selectedRibbonEchoRef.current = selectedItem
+      suppressNextEditorBeatRef.current = true
+      documentStorage.setLastDocumentId(id)
+      const loaded = filterEchoesForKnowledgeBase(
+        flowHistory.load(doc.id),
+        knowledgeBaseService.getActive(),
+      )
+      skipNextKnowledgeHydrateRef.current = doc.id
+      setDocumentId(doc.id)
+      setTitle(doc.title || '鏃犻')
+      setContent(doc.content || '')
+      setEchoes(loaded)
+      setRibbonState(
+        ribbonEngine.hydrate(
+          loaded,
+          Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as RibbonSlotCount,
+          doc.id,
+        ),
+      )
+      try {
+        const savedEchoes = localStorage.getItem(DISPLAY_ECHOES_KEY)
+        const savedEchoDocId = localStorage.getItem(DISPLAY_ECHOES_DOC_ID_KEY)
+        if (savedEchoDocId === doc.id && savedEchoes) {
+          const parsed = JSON.parse(savedEchoes)
+          const restoredSlots = normalizeStoredRibbonSlots(parsed, ribbonSlotCount)
+          if (restoredSlots && restoredSlots.some((item) => item !== null)) {
+            setRestoredRibbonSlots(restoredSlots)
+            setRestoredRibbonDocId(doc.id)
+            setRibbonRestoreFrozen(true)
+          }
         } else {
-          setWritingPanelOpen(true)
-          setWritingPanelTab('today')
-          setSelectedRibbonEcho(null)
-          selectedRibbonEchoRef.current = null
+          setRestoredRibbonSlots(null)
+          setRestoredRibbonDocId(null)
+          setRibbonRestoreFrozen(false)
         }
+
+        const savedHomeUi = localStorage.getItem(HOME_UI_STATE_KEY)
+        if (savedHomeUi) {
+          const parsedUi = JSON.parse(savedHomeUi) as {
+            documentId?: string
+            selectedRibbonEchoId?: string | null
+            ribbonSlots?: unknown
+          }
+          if (parsedUi.documentId === doc.id) {
+            const restoredSlots = normalizeStoredRibbonSlots(parsedUi.ribbonSlots, ribbonSlotCount)
+            const selectedItem =
+              restoredSlots?.find((item) => item?.id === parsedUi.selectedRibbonEchoId) ?? null
+            setSelectedRibbonEcho(selectedItem)
+            selectedRibbonEchoRef.current = selectedItem
+            setContextPanelMode(selectedItem ? 'echo' : null)
+          } else {
+            setSelectedRibbonEcho(null)
+            selectedRibbonEchoRef.current = null
+            setContextPanelMode(null)
+          }
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
-    }
-    setAssistResults({})
-    setCurrentParagraph('')
-    lastTextRef.current = doc.content || ''
-    lastRefreshedTextRef.current = doc.content || ''
-  }, [ribbonSlotCount, settings.ribbonSettings?.slotCount, stopHeartbeat])
+      setAssistResults({})
+      setCurrentParagraph('')
+      setCurrentParagraphRange(null)
+      lastTextRef.current = doc.content || ''
+      lastRefreshedTextRef.current = doc.content || ''
+    },
+    [ribbonSlotCount, settings.ribbonSettings?.slotCount, stopHeartbeat],
+  )
 
   const handleNewDocument = useCallback(() => {
     stopHeartbeat()
@@ -1934,16 +2323,22 @@ export default function Home() {
     setTitle('鏃犻')
     setContent('')
     setEchoes([])
-    setRibbonState(ribbonEngine.hydrate([], Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as RibbonSlotCount, id))
+    setRibbonState(
+      ribbonEngine.hydrate(
+        [],
+        Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as RibbonSlotCount,
+        id,
+      ),
+    )
     setRestoredRibbonSlots(null)
     setRestoredRibbonDocId(null)
     setRibbonRestoreFrozen(false)
-    setWritingPanelOpen(true)
-    setWritingPanelTab('today')
     setSelectedRibbonEcho(null)
     selectedRibbonEchoRef.current = null
+    setContextPanelMode(null)
     setAssistResults({})
     setCurrentParagraph('')
+    setCurrentParagraphRange(null)
     lastTextRef.current = ''
     lastRefreshedTextRef.current = ''
   }, [settings.ribbonSettings?.slotCount, stopHeartbeat])
@@ -1958,116 +2353,152 @@ export default function Home() {
   )
   const referenceEcho = useMemo(() => pickReferenceEcho(visibleRibbonEchoes), [visibleRibbonEchoes])
 
-  const addMaterial = useCallback((input: { content: string; note?: string; tags?: string[]; source?: string; kind?: 'echo' | 'selection' | 'note' | 'plot' | 'exercise'; characterName?: string; sceneId?: string | null; blockId?: string | null; contextExcerpt?: string; status?: MaterialStatus }) => {
-    if (!documentId || !input.content.trim()) return
-    const fallbackSceneId = input.sceneId !== undefined ? input.sceneId : currentScene?.id ?? null
-    const fallbackStatus = input.status ?? (fallbackSceneId ? 'queued' : 'inbox')
-    const next = writingWorkspaceStorage.addMaterial(documentId, {
-      kind: input.kind ?? 'note',
-      content: input.content.trim(),
-      note: input.note?.trim(),
-      source: input.source,
-      sceneId: fallbackSceneId,
-      blockId: input.blockId ?? currentBlockIdRef.current,
-      characterName: input.characterName?.trim() || undefined,
-      contextExcerpt: input.contextExcerpt ?? summarizeRevisionContext(currentParagraph || input.content),
-      status: fallbackStatus,
-      tags: input.tags ?? [],
-    })
-    setWorkspace(next)
-  }, [currentParagraph, currentScene?.id, documentId])
+  const _addMaterial = useCallback(
+    (input: {
+      content: string
+      note?: string
+      tags?: string[]
+      source?: string
+      kind?: 'echo' | 'selection' | 'note' | 'plot' | 'exercise'
+      characterName?: string
+      sceneId?: string | null
+      blockId?: string | null
+      contextExcerpt?: string
+      status?: MaterialStatus
+    }) => {
+      if (!documentId || !input.content.trim()) return
+      const fallbackSceneId =
+        input.sceneId !== undefined ? input.sceneId : (currentScene?.id ?? null)
+      const fallbackStatus = input.status ?? (fallbackSceneId ? 'queued' : 'inbox')
+      const next = writingWorkspaceStorage.addMaterial(documentId, {
+        kind: input.kind ?? 'note',
+        content: input.content.trim(),
+        note: input.note?.trim(),
+        source: input.source,
+        sceneId: fallbackSceneId,
+        blockId: input.blockId ?? currentBlockIdRef.current,
+        characterName: input.characterName?.trim() || undefined,
+        contextExcerpt:
+          input.contextExcerpt ?? summarizeRevisionContext(currentParagraph || input.content),
+        status: fallbackStatus,
+        tags: input.tags ?? [],
+      })
+      setWorkspace(next)
+    },
+    [currentParagraph, currentScene?.id, documentId],
+  )
 
-  const addRevision = useCallback((input: {
-    title: string
-    detail?: string
-    kind?: 'manual' | 'radar' | 'plot' | 'character' | 'cliche'
-    tags?: string[]
-    priority?: RevisionTaskPriority
-    contextExcerpt?: string
-    blockId?: string | null
-  }) => {
-    if (!documentId || !input.title.trim()) return
-    const fallbackContext = summarizeRevisionContext(selectionText || currentParagraph || lastTextRef.current)
-    const next = writingWorkspaceStorage.addRevision(documentId, {
-      title: input.title.trim(),
-      detail: input.detail?.trim(),
-      kind: input.kind ?? 'manual',
-      priority: input.priority ?? revisionPriorityFromSeverity(input.kind ?? 'manual'),
-      contextExcerpt: input.contextExcerpt ?? fallbackContext,
-      tags: input.tags ?? [],
-      blockId: input.blockId ?? currentBlockIdRef.current,
-    })
-    setWorkspace(next)
-  }, [currentParagraph, documentId, selectionText])
+  const _addRevision = useCallback(
+    (input: {
+      title: string
+      detail?: string
+      kind?: 'manual' | 'radar' | 'plot' | 'character' | 'cliche'
+      tags?: string[]
+      priority?: RevisionTaskPriority
+      contextExcerpt?: string
+      blockId?: string | null
+    }) => {
+      if (!documentId || !input.title.trim()) return
+      const fallbackContext = summarizeRevisionContext(
+        selectionText || currentParagraph || lastTextRef.current,
+      )
+      const next = writingWorkspaceStorage.addRevision(documentId, {
+        title: input.title.trim(),
+        detail: input.detail?.trim(),
+        kind: input.kind ?? 'manual',
+        priority: input.priority ?? revisionPriorityFromSeverity(input.kind ?? 'manual'),
+        contextExcerpt: input.contextExcerpt ?? fallbackContext,
+        tags: input.tags ?? [],
+        blockId: input.blockId ?? currentBlockIdRef.current,
+      })
+      setWorkspace(next)
+    },
+    [currentParagraph, documentId, selectionText],
+  )
 
-  const addScene = useCallback((input: {
-    chapterTitle?: string
-    title: string
-    summary: string
-    goal?: string
-    tension?: string
-    blockId?: string | null
-    contextExcerpt?: string
-    lastReviewedAt?: string
-  }) => {
-    if (!documentId) return
-    const summary = input.summary.trim()
-    if (!summary && !input.title.trim()) return
-    const orderedScenes = workspace.scenes.slice().sort((a, b) => a.order - b.order)
-    const fallbackChapterTitle =
-      input.chapterTitle?.trim() ||
-      currentScene?.chapterTitle?.trim() ||
-      orderedScenes.at(-1)?.chapterTitle?.trim() ||
-      (orderedScenes.length > 0 ? '未分章' : '第 1 章')
-    const next = writingWorkspaceStorage.addScene(documentId, {
-      chapterTitle: fallbackChapterTitle,
-      title: input.title.trim() || buildSceneTitle(summary),
-      summary,
-      goal: input.goal?.trim(),
-      tension: input.tension?.trim(),
-      blockId: input.blockId ?? null,
-      contextExcerpt: input.contextExcerpt ?? summarizeRevisionContext(summary),
-      lastReviewedAt: input.lastReviewedAt,
-    })
-    setWorkspace(next)
-  }, [currentScene?.chapterTitle, documentId, workspace.scenes])
+  const _addScene = useCallback(
+    (input: {
+      chapterTitle?: string
+      title: string
+      summary: string
+      goal?: string
+      tension?: string
+      blockId?: string | null
+      contextExcerpt?: string
+      lastReviewedAt?: string
+    }) => {
+      if (!documentId) return
+      const summary = input.summary.trim()
+      if (!summary && !input.title.trim()) return
+      const orderedScenes = workspace.scenes.slice().sort((a, b) => a.order - b.order)
+      const fallbackChapterTitle =
+        input.chapterTitle?.trim() ||
+        currentScene?.chapterTitle?.trim() ||
+        orderedScenes.at(-1)?.chapterTitle?.trim() ||
+        (orderedScenes.length > 0 ? '未分章' : '第 1 章')
+      const next = writingWorkspaceStorage.addScene(documentId, {
+        chapterTitle: fallbackChapterTitle,
+        title: input.title.trim() || buildSceneTitle(summary),
+        summary,
+        goal: input.goal?.trim(),
+        tension: input.tension?.trim(),
+        blockId: input.blockId ?? null,
+        contextExcerpt: input.contextExcerpt ?? summarizeRevisionContext(summary),
+        lastReviewedAt: input.lastReviewedAt,
+      })
+      setWorkspace(next)
+    },
+    [currentScene?.chapterTitle, documentId, workspace.scenes],
+  )
 
-  const createSnapshot = useCallback((note?: string) => {
-    if (!documentId) return
-    const next = writingWorkspaceStorage.createSnapshot(documentId, {
-      title: title || '未命名',
-      content,
-      note,
-    })
-    setWorkspace(next)
-    toast.success('已保存快照')
-  }, [content, documentId, title])
+  const _createSnapshot = useCallback(
+    (note?: string) => {
+      if (!documentId) return
+      const next = writingWorkspaceStorage.createSnapshot(documentId, {
+        title: title || '未命名',
+        content,
+        note,
+      })
+      setWorkspace(next)
+      toast.success('已保存快照')
+    },
+    [content, documentId, title],
+  )
 
-  const runAssist = useCallback(async (
-    kind: WritingAssistKind,
-    runner: () => Promise<WritingAssistResult>,
-  ) => {
-    setAssistLoading((prev) => ({ ...prev, [kind]: true }))
-    try {
-      const result = await runner()
-      setAssistResults((prev) => ({ ...prev, [kind]: result }))
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : '鍒嗘瀽澶辫触')
-    } finally {
-      setAssistLoading((prev) => ({ ...prev, [kind]: false }))
-    }
-  }, [])
+  const runAssist = useCallback(
+    async (kind: WritingAssistKind, runner: () => Promise<WritingAssistResult>) => {
+      setAssistLoading((prev) => ({ ...prev, [kind]: true }))
+      try {
+        const result = await runner()
+        setAssistResults((prev) => ({ ...prev, [kind]: result }))
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : '鍒嗘瀽澶辫触')
+      } finally {
+        setAssistLoading((prev) => ({ ...prev, [kind]: false }))
+      }
+    },
+    [],
+  )
 
-  const handleRunRevisionRadar = useCallback(() => {
-    const text = (selectionText.trim() || currentParagraph.trim() || lastTextRef.current.trim()).slice(0, 1800)
+  const _handleRunRevisionRadar = useCallback(() => {
+    const text = (
+      selectionText.trim() ||
+      currentParagraph.trim() ||
+      lastTextRef.current.trim()
+    ).slice(0, 1800)
     if (!text) return
     void runAssist('revision_radar', () => generateRevisionRadar(text, detailAiSettings))
   }, [currentParagraph, detailAiSettings, runAssist, selectionText])
 
-  const handleRunPlotProgression = useCallback(() => {
+  const _handleRunPlotProgression = useCallback(() => {
     const text = (currentParagraph.trim() || lastTextRef.current.trim()).slice(0, 1800)
     if (!text) return
-    const referenceText = (selectedRibbonEcho?.originalText ?? referenceEcho?.originalText ?? referenceEcho?.content ?? '').trim()
+    const referenceText = (
+      selectedRibbonEcho?.originalText ??
+      referenceEcho?.originalText ??
+      referenceEcho?.content ??
+      ''
+    ).trim()
     const referenceLabel = selectedRibbonEcho?.source ?? referenceEcho?.source ?? undefined
     void runAssist('plot', () =>
       generatePlotProgression(text, detailAiSettings, {
@@ -2088,12 +2519,24 @@ export default function Home() {
         return result
       }),
     )
-  }, [currentParagraph, currentScene, detailAiSettings, documentId, referenceEcho, runAssist, selectedRibbonEcho])
+  }, [
+    currentParagraph,
+    currentScene,
+    detailAiSettings,
+    documentId,
+    referenceEcho,
+    runAssist,
+    selectedRibbonEcho,
+  ])
 
-  const handleRunCharacterConsistency = useCallback(() => {
+  const _handleRunCharacterConsistency = useCallback(() => {
     const text = (currentParagraph.trim() || lastTextRef.current.trim()).slice(0, 1800)
     if (!text) return
-    const referenceText = (selectedRibbonEcho?.originalText ?? referenceEcho?.originalText ?? '').trim()
+    const referenceText = (
+      selectedRibbonEcho?.originalText ??
+      referenceEcho?.originalText ??
+      ''
+    ).trim()
     const referenceLabel = selectedRibbonEcho?.source ?? referenceEcho?.source ?? undefined
     void runAssist('character', () =>
       generateCharacterConsistency(text, detailAiSettings, {
@@ -2114,12 +2557,25 @@ export default function Home() {
         return result
       }),
     )
-  }, [currentParagraph, currentScene, detailAiSettings, documentId, referenceEcho, runAssist, selectedRibbonEcho])
+  }, [
+    currentParagraph,
+    currentScene,
+    detailAiSettings,
+    documentId,
+    referenceEcho,
+    runAssist,
+    selectedRibbonEcho,
+  ])
 
-  const handleRunSceneMemoryMap = useCallback(() => {
+  const _handleRunSceneMemoryMap = useCallback(() => {
     const text = (currentParagraph.trim() || lastTextRef.current.trim()).slice(0, 1800)
     if (!text) return
-    const referenceText = (selectedRibbonEcho?.originalText ?? referenceEcho?.originalText ?? referenceEcho?.content ?? '').trim()
+    const referenceText = (
+      selectedRibbonEcho?.originalText ??
+      referenceEcho?.originalText ??
+      referenceEcho?.content ??
+      ''
+    ).trim()
     const referenceLabel = selectedRibbonEcho?.source ?? referenceEcho?.source ?? undefined
     void runAssist('memory_map', () =>
       generateSceneMemoryMap(text, detailAiSettings, {
@@ -2164,28 +2620,49 @@ export default function Home() {
         return result
       }),
     )
-  }, [currentParagraph, currentScene, detailAiSettings, documentId, referenceEcho, runAssist, selectedRibbonEcho, workspace])
+  }, [
+    currentParagraph,
+    currentScene,
+    detailAiSettings,
+    documentId,
+    referenceEcho,
+    runAssist,
+    selectedRibbonEcho,
+    workspace,
+  ])
 
-  const handleApplyStructureInsightToCurrentScene = useCallback((detail: string) => {
-    if (!documentId || !currentScene) {
-      toast.error('先把当前段落变成场景卡，再写回结构判断')
-      return
-    }
-    const nextGoal = currentScene.goal?.trim()
-    const nextTension = currentScene.tension?.trim()
-    const trimmed = detail.trim()
-    const next = writingWorkspaceStorage.updateScene(documentId, currentScene.id, {
-      goal: nextGoal || trimmed,
-      tension: nextGoal ? (nextTension ? `${nextTension} / ${trimmed}` : trimmed) : nextTension,
-      lastReviewedAt: new Date().toISOString(),
-    })
-    setWorkspace(next)
-    toast.success('宸插啓鍏ュ綋鍓嶅満鏅崱')
-  }, [currentScene, documentId])
+  const _handleApplyStructureInsightToCurrentScene = useCallback(
+    (detail: string) => {
+      if (!documentId || !currentScene) {
+        toast.error('先把当前段落变成场景卡，再写回结构判断')
+        return
+      }
+      const nextGoal = currentScene.goal?.trim()
+      const nextTension = currentScene.tension?.trim()
+      const trimmed = detail.trim()
+      const next = writingWorkspaceStorage.updateScene(documentId, currentScene.id, {
+        goal: nextGoal || trimmed,
+        tension: nextGoal ? (nextTension ? `${nextTension} / ${trimmed}` : trimmed) : nextTension,
+        lastReviewedAt: new Date().toISOString(),
+      })
+      setWorkspace(next)
+      toast.success('宸插啓鍏ュ綋鍓嶅満鏅崱')
+    },
+    [currentScene, documentId],
+  )
 
-  const handleRunImitationDrill = useCallback(() => {
-    const text = (selectionText.trim() || currentParagraph.trim() || lastTextRef.current.trim()).slice(0, 1400)
-    const referenceText = (selectedRibbonEcho?.originalText ?? referenceEcho?.originalText ?? referenceEcho?.content ?? '').trim()
+  const _handleRunImitationDrill = useCallback(() => {
+    const text = (
+      selectionText.trim() ||
+      currentParagraph.trim() ||
+      lastTextRef.current.trim()
+    ).slice(0, 1400)
+    const referenceText = (
+      selectedRibbonEcho?.originalText ??
+      referenceEcho?.originalText ??
+      referenceEcho?.content ??
+      ''
+    ).trim()
     const referenceLabel = selectedRibbonEcho?.source ?? referenceEcho?.source ?? undefined
     if (!text || !referenceText) {
       toast.error('鍏堥€変竴鏉″洖澹版垨绛変簰鏂囨潗鏂欏嚭鐜帮紝鍐嶅仛浠垮啓闄粌')
@@ -2194,7 +2671,14 @@ export default function Home() {
     void runAssist('imitation', () =>
       generateImitationDrill(text, referenceText, detailAiSettings, { referenceLabel }),
     )
-  }, [currentParagraph, detailAiSettings, referenceEcho, runAssist, selectedRibbonEcho, selectionText])
+  }, [
+    currentParagraph,
+    detailAiSettings,
+    referenceEcho,
+    runAssist,
+    selectedRibbonEcho,
+    selectionText,
+  ])
 
   if (documentId === null) {
     return (
@@ -2205,29 +2689,30 @@ export default function Home() {
   }
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-[var(--color-paper)]">
-      <DocumentPanel
-        currentDocumentId={documentId}
-        onOpenDocument={handleOpenDocument}
-        onNewDocument={handleNewDocument}
-      />
-      <div className="fixed top-6 right-8 flex flex-col gap-4 z-[60]">
-        <KnowledgePanel aiStatus={aiStatus} />
-        <DevPanel />
-      </div>
+    <div className="flex h-screen flex-col overflow-hidden bg-[var(--color-paper)]">
+      <header className="shrink-0 px-7 py-0.5">
+        <div className="mx-auto flex w-full max-w-[1420px] items-center justify-between gap-3">
+          <DocumentPanel
+            currentDocumentId={documentId}
+            onOpenDocument={handleOpenDocument}
+            onNewDocument={handleNewDocument}
+          />
+          <div className="ml-auto shrink-0">
+            <KnowledgePanel aiStatus={aiStatus} />
+          </div>
+        </div>
+      </header>
 
-      <div className="flex-1 flex flex-col min-h-0">
-        <div className="flex-shrink-0 h-[14rem] min-h-[14rem] border-b border-[var(--color-border)]/70 bg-[var(--color-paper)] overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="h-[6.95rem] min-h-[6.95rem] shrink-0 overflow-hidden">
           <AmbientRibbon
-              echoes={
-                renderedRibbonSlots.filter((item): item is EchoItem => item !== null)
-              }
-              slots={
-                renderedRibbonSlots
-              }
+            echoes={renderedRibbonSlots.filter((item): item is EchoItem => item !== null)}
+            slots={renderedRibbonSlots}
             freezeLayout={shouldPreferFrozenRibbonSnapshot}
             suppressEmptyHint={shouldPreferFrozenRibbonSnapshot}
-            slotCount={(Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as RibbonSlotCount)}
+            slotCount={
+              Math.min(8, Math.max(5, settings.ribbonSettings?.slotCount ?? 5)) as RibbonSlotCount
+            }
             currentBlockId={currentBlockId}
             hasApiKey={hasApiKey}
             hasKnowledge={hasKnowledge}
@@ -2235,163 +2720,81 @@ export default function Home() {
             onRibbonSelect={(item) => {
               selectedRibbonEchoRef.current = item
               setSelectedRibbonEcho(item)
+              setContextPanelMode(item ? 'echo' : null)
             }}
             onEchoCopied={recordEchoAdoption}
           />
         </div>
 
-        <main className="flex-1 min-h-0 overflow-y-auto">
-          <div className="flex flex-col items-center pt-8 pb-32 px-6">
-            <div className="w-full max-w-2xl mb-12">
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="鏃犻"
-                className="bg-transparent border-none outline-none text-2xl font-bold placeholder:opacity-20 w-full mb-4 text-[var(--color-ink)]"
-                aria-label="Document title"
-              />
-              <div className="w-12 h-0.5 bg-[var(--color-border)]" />
-            </div>
+        <main className="min-h-0 flex-1">
+          <div className="relative mx-auto flex h-full w-full max-w-[1420px] flex-col gap-4 px-6 pb-8 pt-3 xl:pb-10">
+            <section className="mx-auto flex min-h-0 w-full max-w-[820px] min-w-0 flex-1 flex-col pt-1">
+              <div className="shrink-0 pb-1.5">
+                <input
+                  type="text"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="无题"
+                  className="w-full appearance-none rounded-none border-0 bg-transparent p-0 text-[1.38rem] font-semibold text-[var(--color-ink)] outline-none ring-0 shadow-none [-webkit-appearance:none] focus:border-0 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 placeholder:opacity-20"
+                  aria-label="Document title"
+                />
+              </div>
 
-            <div className="w-full max-w-2xl mx-auto">
-              {settings.sensoryZoomEnabled && (
-                <div className="flex items-center gap-2 mb-2">
-                  <button
-                    type="button"
-                    onClick={handleSensoryZoom}
-                    disabled={sensoryZoomLoading}
-                    className="px-3 py-1.5 text-sm rounded-md bg-[var(--color-accent)]/15 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 disabled:opacity-50 transition-colors"
-                  >
-                    {sensoryZoomLoading ? '加载中…' : '感官放大 Alt+Z'}
-                  </button>
+              <div ref={editorScrollRef} className="no-scrollbar min-h-0 flex-1 overflow-y-auto">
+                <div className="space-y-2 pb-8">
+                  <div className="relative w-full pl-4">
+                    {shouldShowClicheAction && (
+                      <div
+                        className="pointer-events-none absolute left-0 z-20 flex"
+                        style={{ top: `${Math.max(8, clicheActionOffset ?? 0)}px` }}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="block w-[3px] rounded-full bg-[rgba(220,38,38,0.72)]"
+                          style={{ height: `${clicheActionHeight}px` }}
+                        />
+                      </div>
+                    )}
+                    <EchoEditor
+                      ref={editorRef}
+                      key={documentId}
+                      initialContent={content}
+                      contentVersion={editorContentVersion}
+                      onUpdate={handleEditorUpdate}
+                      onActiveBlockChange={handleActiveBlockChange}
+                      onContentChange={handleContentChange}
+                      onSave={handleManualSave}
+                      onInspire={handleInspire}
+                      onSelectionChange={setSelectionText}
+                      onParagraphChange={handleParagraphChangeFromEditor}
+                    />
+                  </div>
                 </div>
-              )}
-              {settings.clicheDetectionEnabled && clicheMatches.length > 0 && (
-                <div className="flex items-center gap-2 mb-2">
-                  <button
-                    type="button"
-                    onClick={handleClicheAlternatives}
-                    className="px-3 py-1.5 text-sm rounded-md border border-amber-500/40 text-amber-600 dark:text-amber-400 hover:bg-amber-500/10 transition-colors"
-                  >
-                    濂楄矾璇嶏紝鐐瑰嚮鑾峰彇鏇夸唬琛ㄨ揪
-                  </button>
-                </div>
-              )}
-              <EchoEditor
-                ref={editorRef}
-                key={documentId}
-                initialContent={content}
-                contentVersion={editorContentVersion}
-                onUpdate={handleEditorUpdate}
-                onContentChange={handleContentChange}
-                onSave={handleManualSave}
-                onInspire={handleInspire}
-                onSelectionChange={setSelectionText}
-                onSensoryZoom={handleSensoryZoom}
-                onParagraphChange={handleParagraphChangeFromEditor}
-              />
-            </div>
+              </div>
+            </section>
 
-            {sensoryZoomResults != null && sensoryZoomResults.length > 0 && (
-              <FloatingResultPanel
-                title="感官放大"
-                subtitle="从共鸣库里提一组更细的触觉、听觉或视觉细节。"
-                emptyText="这次没有拿到可用细节。"
-                items={sensoryZoomResults.map((item) => ({
-                  id: item.id,
-                  content: item.content,
-                  onClick: () => {
-                    const copied = item.originalText ?? item.content ?? ''
-                    navigator.clipboard.writeText(copied).then(() => toast.success('已复制'), () => {})
-                  },
-                }))}
-                onClose={() => setSensoryZoomResults(null)}
+            <aside
+              aria-hidden={!hasSideNotes}
+              className={`${
+                hasSideNotes
+                  ? 'mx-auto flex w-full max-w-[820px] flex-col opacity-100 xl:absolute xl:right-6 xl:top-0 xl:mx-0 xl:w-[264px] xl:max-w-none'
+                  : 'hidden xl:absolute xl:right-6 xl:top-0 xl:flex xl:w-[264px] xl:max-w-none xl:flex-col xl:pointer-events-none xl:opacity-0'
+              } gap-4 pt-1 transition-opacity duration-200`}
+            >
+              <RibbonDetailPanel
+                panel={contextPanel}
+                onClose={() => {
+                  if (contextPanelMode === 'echo') {
+                    selectedRibbonEchoRef.current = null
+                    setSelectedRibbonEcho(null)
+                  }
+                  setContextPanelMode(null)
+                }}
               />
-            )}
-
-            {showClichePopover && (
-              <FloatingResultPanel
-                title="非套路替代表达"
-                subtitle="保留当前意思，换成更不顺手滑出的说法。"
-                loading={clicheAlternativesLoading}
-                emptyText="暂时没找到更合适的替代表达。"
-                items={clicheAlternatives.map((item) => ({
-                  id: item.id,
-                  content: item.content,
-                  onClick: () => {
-                    const copied = item.originalText ?? item.content ?? ''
-                    navigator.clipboard.writeText(copied).then(() => toast.success('已复制'), () => {})
-                  },
-                }))}
-                onClose={() => setShowClichePopover(false)}
-              />
-            )}
+            </aside>
           </div>
         </main>
       </div>
-
-      <RibbonDetailPanel
-        item={selectedRibbonEcho}
-        currentSceneLabel={currentScene?.title ?? null}
-        onCaptureMaterial={handleCaptureRibbonEcho}
-        onCreateRevision={handleCreateRevisionFromEcho}
-        onConvertToMemory={handleConvertEchoToMemory}
-        onClose={() => {
-          selectedRibbonEchoRef.current = null
-          setSelectedRibbonEcho(null)
-        }}
-      />
-      <WritingAssistantPanel
-        isOpen={writingPanelOpen}
-        onOpenChange={setWritingPanelOpen}
-        activeTab={writingPanelTab}
-        onTabChange={setWritingPanelTab}
-        profile={profile}
-        workspace={workspace}
-        selectedText={selectionText}
-        selectedEcho={selectedRibbonEcho}
-        currentParagraph={currentParagraph}
-        currentBlockId={currentBlockId}
-        currentScene={currentScene}
-        assistResults={assistResults}
-        assistLoading={assistLoading}
-        onRunRevisionRadar={handleRunRevisionRadar}
-        onRunPlotProgression={handleRunPlotProgression}
-        onRunCharacterConsistency={handleRunCharacterConsistency}
-        onRunImitationDrill={handleRunImitationDrill}
-        onRunSceneMemoryMap={handleRunSceneMemoryMap}
-        onCaptureSelection={handleCaptureSelection}
-        onCaptureEcho={handleCaptureEcho}
-        onAddManualMaterial={(input) => addMaterial({ ...input, kind: 'note' })}
-        onUpdateMaterialTags={handleUpdateMaterialTags}
-        onAssignMaterialToCurrentScene={handleAssignMaterialToCurrentScene}
-        onUpdateMaterialStatus={handleUpdateMaterialStatus}
-        onMoveMaterialToInbox={handleMoveMaterialToInbox}
-        onLinkMaterialToRevision={handleLinkMaterialToRevision}
-        onConvertMaterialToMemory={handleConvertMaterialToMemory}
-        onRemoveMaterial={handleRemoveMaterial}
-        onAddRevision={addRevision}
-        onUpdateRevisionStatus={handleUpdateRevisionStatus}
-        onRemoveRevision={handleRemoveRevision}
-        onFocusRevisionBlock={handleFocusRevisionBlock}
-        onAddSceneFromCurrent={handleAddSceneFromCurrent}
-        onAddScene={addScene}
-        onUpdateScene={handleUpdateScene}
-        onRemoveScene={handleRemoveScene}
-        onAddCharacterWatch={handleAddCharacterWatch}
-        onUpdateCharacterWatchStatus={handleUpdateCharacterWatchStatus}
-        onRemoveCharacterWatch={handleRemoveCharacterWatch}
-        onAddMemoryNode={handleAddMemoryNode}
-        onRemoveMemoryNode={handleRemoveMemoryNode}
-        onAddPracticeDrill={handleAddPracticeDrill}
-        onUpdatePracticeDrillStatus={handleUpdatePracticeDrillStatus}
-        onRemovePracticeDrill={handleRemovePracticeDrill}
-        onApplyStructureInsightToCurrentScene={handleApplyStructureInsightToCurrentScene}
-        onCreateSnapshot={createSnapshot}
-        onRestoreSnapshot={handleRestoreSnapshot}
-        onRemoveSnapshot={handleRemoveSnapshot}
-      />
     </div>
   )
 }

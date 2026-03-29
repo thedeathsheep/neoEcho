@@ -238,7 +238,7 @@ export function filterLowValueAtoms(atoms: ImageryAtom[]): ImageryAtom[] {
     })
     index++
   }
-  out.forEach((a, i) => {
+  out.forEach((a) => {
     a.totalChunks = out.length
   })
   return out

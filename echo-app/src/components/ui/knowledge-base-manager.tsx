@@ -1,15 +1,13 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { AnimatePresence, motion } from 'framer-motion'
+import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 
 import {
+  type KnowledgeBase,
   knowledgeBaseService,
   selectFiles,
-  type KnowledgeBase,
-  type KnowledgeFile,
-  type MandatoryMaxSlots,
 } from '@/services/knowledge-base.service'
 
 interface KnowledgeBaseManagerProps {
@@ -17,10 +15,7 @@ interface KnowledgeBaseManagerProps {
   onClose: () => void
 }
 
-export function KnowledgeBaseManager({
-  isOpen,
-  onClose,
-}: KnowledgeBaseManagerProps) {
+export function KnowledgeBaseManager({ isOpen, onClose }: KnowledgeBaseManagerProps) {
   const [bases, setBases] = useState<KnowledgeBase[]>([])
   const [activeBaseId, setActiveBaseId] = useState<string | null>(null)
   const [isImporting, setIsImporting] = useState(false)
@@ -67,11 +62,7 @@ export function KnowledgeBaseManager({
     const base = bases.find((b) => b.id === baseId)
     if (!base) return
 
-    if (
-      confirm(
-        `确定要删除共鸣库 "${base.name}" 吗？\n库中的所有书籍和意象都将被删除。`,
-      )
-    ) {
+    if (confirm(`确定要删除共鸣库 "${base.name}" 吗？\n库中的所有书籍和意象都将被删除。`)) {
       const deleted = await knowledgeBaseService.delete(baseId)
       if (deleted) {
         toast.success('共鸣库已删除')
@@ -93,13 +84,47 @@ export function KnowledgeBaseManager({
       toast.warning('文件已导入，但本地向量生成失败，织带将仅使用关键词检索')
     }
     window.addEventListener('embedding-skipped', onEmbeddingSkipped)
+    const ocrToastId = `ocr-import-${Date.now()}`
+    const onOcrStarted = (event: Event) => {
+      const detail = (event as CustomEvent<{ fileName: string; totalPages: number }>).detail
+      toast.loading(`正在 OCR 提取文字 · ${detail.fileName}（1/${detail.totalPages} 页）`, {
+        id: ocrToastId,
+      })
+    }
+    const onOcrProgress = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ fileName: string; currentPage: number; totalPages: number }>
+      ).detail
+      toast.loading(
+        `正在 OCR 提取文字 · ${detail.fileName}（${detail.currentPage}/${detail.totalPages} 页）`,
+        {
+          id: ocrToastId,
+        },
+      )
+    }
+    const onOcrFinished = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{ fileName: string; extractedPages: number; totalPages: number }>
+      ).detail
+      toast.success(
+        `OCR 提取完成 · ${detail.fileName}（${detail.extractedPages}/${detail.totalPages} 页）`,
+        {
+          id: ocrToastId,
+        },
+      )
+    }
+    const onOcrFailed = (event: Event) => {
+      const detail = (event as CustomEvent<{ message: string }>).detail
+      toast.error(detail.message || 'OCR 提取失败', { id: ocrToastId })
+    }
+    window.addEventListener('ocr-started', onOcrStarted)
+    window.addEventListener('ocr-progress', onOcrProgress)
+    window.addEventListener('ocr-finished', onOcrFinished)
+    window.addEventListener('ocr-failed', onOcrFailed)
     try {
       const selected = await selectFiles()
       if (selected.length > 0) {
-        const results = await knowledgeBaseService.importFiles(
-          selected,
-          baseId,
-        )
+        const results = await knowledgeBaseService.importFiles(selected, baseId)
         if (results.length > 0) {
           toast.success(`成功导入 ${results.length} 个文件`)
           refreshData()
@@ -113,6 +138,10 @@ export function KnowledgeBaseManager({
     } finally {
       setIsImporting(false)
       window.removeEventListener('embedding-skipped', onEmbeddingSkipped)
+      window.removeEventListener('ocr-started', onOcrStarted)
+      window.removeEventListener('ocr-progress', onOcrProgress)
+      window.removeEventListener('ocr-finished', onOcrFinished)
+      window.removeEventListener('ocr-failed', onOcrFailed)
     }
   }
 
@@ -191,9 +220,7 @@ export function KnowledgeBaseManager({
         >
           {/* Header */}
           <div className="px-6 py-4 border-b border-[var(--color-border)] flex items-center justify-between">
-            <h2 className="text-lg font-medium text-[var(--color-ink)]">
-              共鸣库管理
-            </h2>
+            <h2 className="text-lg font-medium text-[var(--color-ink)]">共鸣库管理</h2>
             <button
               onClick={onClose}
               className="text-[var(--color-ink-faint)] hover:text-[var(--color-ink)] transition-colors"
@@ -250,9 +277,7 @@ export function KnowledgeBaseManager({
                         </div>
                       ) : (
                         <>
-                          <h3 className="font-medium text-[var(--color-ink)]">
-                            {base.name}
-                          </h3>
+                          <h3 className="font-medium text-[var(--color-ink)]">{base.name}</h3>
                           <button
                             onClick={() => handleStartEditName(base)}
                             className="text-xs text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]"
@@ -293,24 +318,21 @@ export function KnowledgeBaseManager({
                       </span>
                       <div className="flex gap-1">
                         {([1, 2, 3] as const).map((n) => (
-                            <button
-                              key={n}
-                              onClick={() => {
-                                knowledgeBaseService.setMandatoryMaxSlots(
-                                  base.id,
-                                  n,
-                                )
-                                refreshData()
-                                toast.success(`已设为最多 ${n} 条`)
-                              }}
-                              className={`px-2.5 py-1 text-xs rounded border transition-colors ${
-                                (base.mandatoryMaxSlots ?? 1) === n
-                                  ? 'border-[var(--color-btn-primary-bg)] bg-[var(--color-btn-primary-bg)] text-[var(--color-btn-primary-text)]'
-                                  : 'border-[var(--color-border)] hover:border-[var(--color-ink-light)]'
-                              }`}
-                            >
-                              {n} 条
-                            </button>
+                          <button
+                            key={n}
+                            onClick={() => {
+                              knowledgeBaseService.setMandatoryMaxSlots(base.id, n)
+                              refreshData()
+                              toast.success(`已设为最多 ${n} 条`)
+                            }}
+                            className={`px-2.5 py-1 text-xs rounded border transition-colors ${
+                              (base.mandatoryMaxSlots ?? 1) === n
+                                ? 'border-[var(--color-btn-primary-bg)] bg-[var(--color-btn-primary-bg)] text-[var(--color-btn-primary-text)]'
+                                : 'border-[var(--color-border)] hover:border-[var(--color-ink-light)]'
+                            }`}
+                          >
+                            {n} 条
+                          </button>
                         ))}
                       </div>
                     </div>
@@ -324,9 +346,7 @@ export function KnowledgeBaseManager({
                       </div>
                     ) : (
                       base.files.map((file) => {
-                        const isMandatory = base.mandatoryBooks?.includes(
-                          file.id,
-                        )
+                        const isMandatory = base.mandatoryBooks?.includes(file.id)
                         return (
                           <div
                             key={file.id}
@@ -336,9 +356,7 @@ export function KnowledgeBaseManager({
                               <input
                                 type="checkbox"
                                 checked={isMandatory}
-                                onChange={() =>
-                                  handleToggleMandatory(base.id, file.id)
-                                }
+                                onChange={() => handleToggleMandatory(base.id, file.id)}
                                 className="w-4 h-4 rounded border-[var(--color-border)]"
                                 title="设为强制检索（每次必出）"
                               />
@@ -347,8 +365,8 @@ export function KnowledgeBaseManager({
                                   {file.fileName}
                                 </div>
                                 <div className="text-xs text-[var(--color-ink-faint)]">
-                                  {file.totalChunks} 意象 ·{' '}
-                                  {Math.round(file.totalChars / 1000)}K 字符
+                                  {file.totalChunks} 意象 · {Math.round(file.totalChars / 1000)}K
+                                  字符
                                   {isMandatory && (
                                     <span className="ml-2 text-[var(--color-ink)] font-medium">
                                       [强制检索]
@@ -358,9 +376,7 @@ export function KnowledgeBaseManager({
                               </div>
                             </div>
                             <button
-                              onClick={() =>
-                                handleRemoveFile(base.id, file.id)
-                              }
+                              onClick={() => handleRemoveFile(base.id, file.id)}
                               className="text-[var(--color-ink-faint)] hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
                               title="删除"
                             >
@@ -436,7 +452,8 @@ export function KnowledgeBaseManager({
           {/* Footer Info */}
           <div className="px-6 py-3 bg-[var(--color-paper-warm)] border-t border-[var(--color-border)] text-xs text-[var(--color-ink-faint)]">
             <p>
-              勾选书籍为「强制检索」后，可设置「织带中强制书籍最多占 1/2/3 条」；其余条数来自其他书籍，避免单本书占满织带。
+              勾选书籍为「强制检索」后，可设置「织带中强制书籍最多占 1/2/3
+              条」；其余条数来自其他书籍，避免单本书占满织带。
             </p>
           </div>
         </motion.div>

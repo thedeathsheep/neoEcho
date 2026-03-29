@@ -1,0 +1,7 @@
+     Running BeforeDevCommand (`pnpm run dev:tauri`)
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching D:\projects\neoEcho\echo-app\src-tauri for changes...
+[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 0.63s
+[1m[92m     Running[0m `target\debug\echo-app.exe`
+⚠ Fast Refresh had to perform a full reload due to a runtime error.
+⚠ Fast Refresh had to perform a full reload due to a runtime error.

@@ -1,6 +1,6 @@
-import { createOpenAI } from '@ai-sdk/openai'
 import { createAnthropic } from '@ai-sdk/anthropic'
-import { generateText, streamText, type LanguageModel } from 'ai'
+import { createOpenAI } from '@ai-sdk/openai'
+import { generateText, type LanguageModel,streamText } from 'ai'
 
 import { env } from '@/lib/config/env'
 import { AIServiceError, UnauthorizedError } from '@/lib/errors'

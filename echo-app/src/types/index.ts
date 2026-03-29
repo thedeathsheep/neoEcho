@@ -3,7 +3,14 @@ export type AIProvider = 'openai' | 'anthropic' | 'deepseek'
 export type AIMode = 'polish' | 'narrative' | 'imagery' | 'quote' | 'custom'
 
 /** Ribbon content module type: rag = 共鸣库; ai:* = built-in AI; custom = custom prompt; quick = quick response (no RAG) */
-export type RibbonModuleType = 'rag' | 'ai:polish' | 'ai:narrative' | 'ai:imagery' | 'ai:quote' | 'custom' | 'quick'
+export type RibbonModuleType =
+  | 'rag'
+  | 'ai:polish'
+  | 'ai:narrative'
+  | 'ai:imagery'
+  | 'ai:quote'
+  | 'custom'
+  | 'quick'
 
 export interface RibbonModuleConfig {
   id: string
@@ -25,7 +32,7 @@ export type AllocationMode = 'balanced' | 'rag_priority' | 'ai_priority' | 'cust
 export interface RibbonSettings {
   slotCount: RibbonSlotCount
   modules: RibbonModuleConfig[]
-  allocationMode?: AllocationMode  // Defaults to 'balanced' if not set
+  allocationMode?: AllocationMode // Defaults to 'balanced' if not set
 }
 
 /** Placeholder item for failed or loading modules */
@@ -112,7 +119,13 @@ export interface RibbonRenderEntry {
 }
 
 export type RibbonJobType = 'imagery' | 'tag' | 'custom'
-export type RibbonJobStatus = 'queued' | 'running' | 'soft_timed_out' | 'done' | 'failed' | 'cancelled'
+export type RibbonJobStatus =
+  | 'queued'
+  | 'running'
+  | 'soft_timed_out'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
 
 export interface RibbonJob {
   id: string
@@ -144,6 +157,8 @@ export interface Document {
   content: string
   createdAt: string
   updatedAt: string
+  slug?: string
+  templateKey?: string
 }
 
 export interface InspireRequest {

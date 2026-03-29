@@ -1,5 +1,6 @@
 import { createLogger } from '@/lib/logger'
 import type { EchoItem } from '@/types'
+
 import { ragService } from './rag.service'
 
 const logger = createLogger('inspire.service')
@@ -16,8 +17,8 @@ export const inspireService = {
   async getEchoes(
     context: string,
     blockId?: string,
-    apiKey?: string,
-    model?: string,
+    _apiKey?: string,
+    _model?: string,
   ): Promise<EchoItem[]> {
     logger.info('Generating echoes', { contextLength: context.length, blockId })
 

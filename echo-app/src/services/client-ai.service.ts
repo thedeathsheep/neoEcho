@@ -27,14 +27,44 @@ export interface DetailGenerationResult {
   usedRag: boolean
 }
 
+export interface ClicheReviewResult {
+  isCliche: boolean
+  confidence: 'low' | 'medium' | 'high'
+  reasonTag: 'stock_phrase' | 'emotion' | 'imagery' | 'transition' | 'generic'
+  message: string
+  matchedPhrases: string[]
+}
+
 interface ModelsResponse {
   data: { id: string }[]
 }
+
+const rejectedQuickModels = new Set<string>()
 
 function apiUrl(baseUrl: string, path: string): string {
   const base = baseUrl.replace(/\/+$/, '')
   const hasV1 = base.endsWith('/v1')
   return hasV1 ? `${base}${path}` : `${base}/v1${path}`
+}
+
+function quickModelKey(baseUrl: string, model: string): string {
+  return `${baseUrl.trim()}::${model.trim()}`
+}
+
+function getQuickModelCandidates(
+  settings: Pick<Settings, 'baseUrl' | 'model' | 'ribbonFilterModel'>,
+): string[] {
+  const quickModel = (settings.ribbonFilterModel || '').trim()
+  const primaryModel = settings.model.trim()
+  const candidates = [quickModel, primaryModel].filter(Boolean)
+
+  return candidates.filter((model, index) => {
+    if (candidates.indexOf(model) !== index) return false
+    if (model === quickModel && rejectedQuickModels.has(quickModelKey(settings.baseUrl, model))) {
+      return false
+    }
+    return true
+  })
 }
 
 function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
@@ -46,12 +76,6 @@ function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
   ])
 }
 
-function debugIngest(hypothesisId: string, location: string, message: string, data: Record<string, unknown>) {
-  // #region agent log
-  fetch('http://127.0.0.1:7776/ingest/bd75bf12-cc2c-45c2-9d32-c1c193905a25',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'626617'},body:JSON.stringify({sessionId:'626617',runId:'diag',hypothesisId,location,message,data,timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
-}
-
 export async function probeChatCompletions(
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
   signal?: AbortSignal,
@@ -59,11 +83,6 @@ export async function probeChatCompletions(
   const url = apiUrl(settings.baseUrl, '/chat/completions')
   const start = Date.now()
   try {
-    debugIngest('H6', 'client-ai.service.ts:probeChatCompletions:start', 'probe start', {
-      baseUrl: settings.baseUrl,
-      model: settings.model,
-      url,
-    })
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -82,20 +101,9 @@ export async function probeChatCompletions(
       signal: withTimeout(signal, 3000),
     })
     const elapsedMs = Date.now() - start
-    debugIngest('H6', 'client-ai.service.ts:probeChatCompletions:res', 'probe response', {
-      status: res.status,
-      elapsedMs,
-      ok: res.ok,
-    })
     return { ok: res.ok, elapsedMs, status: res.status }
   } catch (e) {
     const elapsedMs = Date.now() - start
-    debugIngest('H6', 'client-ai.service.ts:probeChatCompletions:catch', 'probe error', {
-      elapsedMs,
-      errName: (e as Error)?.name,
-      errMsg: (e as Error)?.message,
-      isDOMException: e instanceof DOMException,
-    })
     return { ok: false, elapsedMs, error: (e as Error)?.message }
   }
 }
@@ -130,9 +138,7 @@ export async function validateApiKey(
     }
 
     const data = (await res.json()) as ModelsResponse
-    const models = Array.isArray(data?.data)
-      ? data.data.map((m) => m.id).slice(0, 20)
-      : []
+    const models = Array.isArray(data?.data) ? data.data.map((m) => m.id).slice(0, 20) : []
 
     return { valid: true, models }
   } catch (err) {
@@ -206,7 +212,11 @@ function getSystemPrompt(mode: AIMode): string {
 }
 
 /** Get system prompt for a ribbon module (by type and id for custom). */
-function getSystemPromptForRibbonModule(type: RibbonModuleType, id: string, customPrompt?: string): string {
+function getSystemPromptForRibbonModule(
+  type: RibbonModuleType,
+  id: string,
+  customPrompt?: string,
+): string {
   const clamp = (s: string, max: number) => (s.length > max ? s.slice(0, max) : s)
   const withBudgetGuardrails = (s: string): string => {
     const base = clamp((s || '').trim(), 2400)
@@ -259,7 +269,11 @@ function isParagraphOutputModule(module: { type: RibbonModuleType; id: string })
   return customPromptService.get(module.id)?.outputShape === 'paragraph'
 }
 
-function isEntityExplanationModule(module: { type: RibbonModuleType; id: string; label?: string }): boolean {
+function isEntityExplanationModule(module: {
+  type: RibbonModuleType
+  id: string
+  label?: string
+}): boolean {
   if (module.type !== 'custom') return false
   const prompt = customPromptService.get(module.id)
   return (prompt?.behavior ?? 'freeform') === 'entity_explain'
@@ -271,13 +285,20 @@ function isTermListModule(module: { type: RibbonModuleType; id: string; label?: 
   return (prompt?.behavior ?? 'freeform') === 'term_list'
 }
 
-function isGuidedTermsModule(module: { type: RibbonModuleType; id: string; label?: string }): boolean {
+function isGuidedTermsModule(module: {
+  type: RibbonModuleType
+  id: string
+  label?: string
+}): boolean {
   if (module.type !== 'custom') return false
   const prompt = customPromptService.get(module.id)
   return (prompt?.behavior ?? 'freeform') === 'guided_terms'
 }
 
-function isLongFormModule(module: { type: RibbonModuleType; id: string }, rawText: string): boolean {
+function isLongFormModule(
+  module: { type: RibbonModuleType; id: string },
+  rawText: string,
+): boolean {
   if (module.type !== 'custom') return false
   const prompt = customPromptService.get(module.id)
   if (prompt?.outputShape === 'paragraph') return true
@@ -491,12 +512,20 @@ function buildBatchUserPromptForModule(
     )
   }
 
-  return buildUserPromptByMode(context, module.type === 'custom' && customOptions?.useRag ? ragForAi : [], mode)
+  return buildUserPromptByMode(
+    context,
+    module.type === 'custom' && customOptions?.useRag ? ragForAi : [],
+    mode,
+  )
 }
 
-export function canBatchGenerateEchoesForModule(
-  module: { type: RibbonModuleType; id: string; prompt?: string; model?: string; label?: string },
-): boolean {
+export function canBatchGenerateEchoesForModule(module: {
+  type: RibbonModuleType
+  id: string
+  prompt?: string
+  model?: string
+  label?: string
+}): boolean {
   if (!(module.type.startsWith('ai:') || module.type === 'custom')) return false
   if ((module.model ?? '').trim().length > 0) return false
   if (module.type.startsWith('ai:')) return true
@@ -520,9 +549,10 @@ function parseParagraphModuleResult(
   try {
     const jsonText = extractJsonBlock(trimmed)
     const parsed = JSON.parse(jsonText) as { ribbonText?: unknown; detailText?: unknown }
-    const ribbonText = typeof parsed.ribbonText === 'string'
-      ? parsed.ribbonText.trim().replace(/^实体词[:：]\s*/u, '')
-      : ''
+    const ribbonText =
+      typeof parsed.ribbonText === 'string'
+        ? parsed.ribbonText.trim().replace(/^实体词[:：]\s*/u, '')
+        : ''
     const detailText = typeof parsed.detailText === 'string' ? parsed.detailText.trim() : ''
     const safeRibbon = ribbonText || makeRibbonSummary(detailText)
     const safeDetail = detailText || trimmed
@@ -546,11 +576,7 @@ function parseParagraphModuleResult(
   }
 }
 
-function buildDetailUserPrompt(
-  item: EchoItem,
-  context: string,
-  referenceText?: string,
-): string {
+function buildDetailUserPrompt(item: EchoItem, context: string, referenceText?: string): string {
   const focus = (item.originalText ?? item.content ?? '').trim()
   const source = (item.source ?? '').trim()
   const contextPreview = context.trim().slice(0, 800)
@@ -627,7 +653,10 @@ export async function generatePromptFromDescription(
         model: settings.model,
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: `我需要创建一个自定义模块，具体需求如下：\n\n${description.trim()}\n\n请根据以上描述，生成一段专门的系统提示词。提示词要体现「${description.trim().slice(0, 20)}」这个模块的独特功能，不要生成通用的写作助手提示词。` },
+          {
+            role: 'user',
+            content: `我需要创建一个自定义模块，具体需求如下：\n\n${description.trim()}\n\n请根据以上描述，生成一段专门的系统提示词。提示词要体现「${description.trim().slice(0, 20)}」这个模块的独特功能，不要生成通用的写作助手提示词。`,
+          },
         ],
         temperature: 0.7,
         max_tokens: 512,
@@ -654,7 +683,11 @@ export async function generatePromptFromDescription(
 }
 
 /** Get display label for a ribbon module (shown in ribbon cell). */
-export function getModuleDisplayLabel(type: RibbonModuleType, id: string, labelOverride?: string): string {
+export function getModuleDisplayLabel(
+  type: RibbonModuleType,
+  id: string,
+  labelOverride?: string,
+): string {
   if (labelOverride?.trim()) return labelOverride.trim()
   if (type === 'custom') {
     const prompt = customPromptService.get(id)
@@ -663,20 +696,20 @@ export function getModuleDisplayLabel(type: RibbonModuleType, id: string, labelO
   }
   if (type === 'quick') {
     // Quick modules use their label directly
-    const builtin = BUILTIN_RIBBON_MODULES.find(m => m.id === id)
+    const builtin = BUILTIN_RIBBON_MODULES.find((m) => m.id === id)
     if (builtin?.label) return builtin.label
     return '快速助手'
   }
   const labels: Record<string, string> = {
-    'ai:imagery': 'AI 意象',
-    'ai:polish': 'AI 润色',
-    'ai:narrative': 'AI 叙事',
-    'ai:quote': 'AI 引用',
+    'ai:imagery': '??',
+    'ai:polish': '??',
+    'ai:narrative': '??',
+    'ai:quote': '??',
   }
   if (type.startsWith('ai:')) {
-    return labels[type] || 'AI 生成'
+    return labels[type] || '生成'
   }
-  return 'AI 生成'
+  return '生成'
 }
 
 function withDetailGuardrails(prompt: string): string {
@@ -708,7 +741,10 @@ export async function summarizeRagChunks(
   const model = (settings.ribbonFilterModel || '').trim() || settings.model
   const toSummarize = items.slice(0, RAG_SUMMARIZE_TOP_N)
   const list = toSummarize
-    .map((r, i) => `${i + 1}. ${((r.originalText ?? r.content ?? '').toString().trim().slice(0, 200).replace(/\n/g, ' '))}`)
+    .map(
+      (r, i) =>
+        `${i + 1}. ${(r.originalText ?? r.content ?? '').toString().trim().slice(0, 200).replace(/\n/g, ' ')}`,
+    )
     .join('\n')
   const userContent = `为以下每条片段输出一行：摘要（20-40字）| 标签（4-6字）。仅输出这些行，不要其他内容。\n\n${list}`
 
@@ -734,7 +770,10 @@ export async function summarizeRagChunks(
 
     const data = (await res.json()) as ChatCompletionResponse
     const raw = (data.choices?.[0]?.message?.content ?? '').trim()
-    const lines = raw.split(/\n/).map((s) => s.trim()).filter(Boolean)
+    const lines = raw
+      .split(/\n/)
+      .map((s) => s.trim())
+      .filter(Boolean)
 
     const out = items.map((r, i) => {
       if (i >= toSummarize.length) return { ...r }
@@ -791,7 +830,10 @@ export async function correctRagResultsForContext(
 
     const data = (await res.json()) as ChatCompletionResponse
     const raw = (data.choices?.[0]?.message?.content ?? '').trim()
-    const corrected = raw.split(/\s*---\s*/).map((s) => s.trim()).filter(Boolean)
+    const corrected = raw
+      .split(/\s*---\s*/)
+      .map((s) => s.trim())
+      .filter(Boolean)
 
     if (corrected.length !== items.length) return items
 
@@ -807,11 +849,7 @@ export async function correctRagResultsForContext(
 
 const RAG_CONTEXT_TOP_N = 6
 
-function buildUserPromptByMode(
-  context: string,
-  ragResults: EchoItem[],
-  mode: AIMode,
-): string {
+function buildUserPromptByMode(context: string, ragResults: EchoItem[], mode: AIMode): string {
   const userContext = (context.slice(0, 800) || '').trim()
   const topRag = ragResults.slice(0, RAG_CONTEXT_TOP_N)
   const ragContext =
@@ -819,7 +857,7 @@ function buildUserPromptByMode(
       ? `\n\n【资料】\n${topRag
           .map(
             (r, i) =>
-              `【资料${i + 1}】来自《${(r.source ?? '共鸣库').trim()}》 ${(r.shortSummary ?? (r.originalText ?? r.content ?? '').trim().slice(0, 80))}`
+              `【资料${i + 1}】来自《${(r.source ?? '共鸣库').trim()}》 ${r.shortSummary ?? (r.originalText ?? r.content ?? '').trim().slice(0, 80)}`,
           )
           .join('\n')}`
       : ''
@@ -866,7 +904,10 @@ export async function rerankRagCandidates(
   const model = (settings.ribbonFilterModel || '').trim() || settings.model
   const toRerank = candidates.slice(0, RERANK_RAG_TOP_N)
   const list = toRerank
-    .map((c, i) => `${i}. ${((c as EchoItem).originalText ?? (c as EchoItem).content ?? '').toString().slice(0, 150).replace(/\n/g, ' ')}`)
+    .map(
+      (c, i) =>
+        `${i}. ${((c as EchoItem).originalText ?? (c as EchoItem).content ?? '').toString().slice(0, 150).replace(/\n/g, ' ')}`,
+    )
     .join('\n')
   const userContent = `Query: "${query.slice(0, 200)}"\n\nSnippets:\n${list}\n\nOutput ${toRerank.length} relevance scores (0.0-1.0), space-separated, in order:`
 
@@ -897,7 +938,10 @@ export async function rerankRagCandidates(
     const raw = (data.choices?.[0]?.message?.content ?? '').trim()
     const scores = raw.split(/\s+/).map((s) => Math.min(1, Math.max(0, parseFloat(s) || 0)))
     const elapsed = Date.now() - start
-    devLog.push('ai', 'rerankRagCandidates done', { elapsedMs: elapsed, scoresCount: scores.length })
+    devLog.push('ai', 'rerankRagCandidates done', {
+      elapsedMs: elapsed,
+      scoresCount: scores.length,
+    })
 
     const baseMax = Math.max(...candidates.map((c) => c.baseScore), 1)
     const withFinal = candidates.map((c, i) => {
@@ -912,7 +956,10 @@ export async function rerankRagCandidates(
     return reranked
   } catch (err) {
     const elapsed = Date.now() - start
-    devLog.push('ai', 'rerankRagCandidates timeout or error', { elapsedMs: elapsed, err: (err as Error).message })
+    devLog.push('ai', 'rerankRagCandidates timeout or error', {
+      elapsedMs: elapsed,
+      err: (err as Error).message,
+    })
     return candidates
   }
 }
@@ -966,6 +1013,19 @@ export async function expandQueryForRAG(
 const RIBBON_FILTER_SYSTEM = `You are a filter. Given a list of text snippets from document retrieval, output which ones to KEEP (valuable for writing inspiration). Exclude: headers, footers, watermarks, URLs, "来自...", "汇总:", metadata, repetitive or empty content.
 Output only the zero-based indices to keep, comma-separated (e.g. 0,2,4). If all are valuable, output ALL. No other text.`
 
+const CLICHE_REVIEW_SYSTEM = `You judge whether a sentence feels like a cliché in contemporary Chinese creative writing.
+Mark it as cliché when the expression feels overly familiar, ready-made, or low in freshness, especially in these cases:
+- stock emotional wording that sounds pre-packaged rather than observed
+- familiar atmosphere writing built from "stillness / freezing / thunder / shock" style imagery
+- predictable lyrical metaphors that many web-fiction or romance passages would also produce
+- generic transition or summary phrasing with little concrete texture
+Do not require an exact phrase match. Judge the overall feel of the sentence.
+Be willing to mark "soft cliché" as true when the sentence is not terrible but does feel too familiar.
+Return JSON only with this schema:
+{"isCliche":boolean,"confidence":"low"|"medium"|"high","reasonTag":"stock_phrase"|"emotion"|"imagery"|"transition"|"generic","message":"short Chinese sentence <=30 chars"}
+The message should be a gentle Chinese notice, not a rewrite.
+Do not suggest rewrites. Do not add markdown.`
+
 /**
  * Filter ribbon candidates with a quick model call to drop low-value snippets.
  * Returns original list on API failure or parse error.
@@ -977,51 +1037,153 @@ export async function filterRibbonCandidates(
   signal?: AbortSignal,
 ): Promise<EchoItem[]> {
   if (!settings.apiKey || items.length === 0) return items
-  const model = (settings.ribbonFilterModel || '').trim() || settings.model
 
   const list = items
     .map((item, i) => `${i}. ${(item.content || '').slice(0, 120).replace(/\n/g, ' ')}`)
     .join('\n')
   const userContent = `Current writing context: "${context.slice(0, 100)}"\n\nSnippets:\n${list}\n\nOutput indices to keep (comma-separated) or ALL:`
 
-  try {
-    const res = await fetch(apiUrl(settings.baseUrl, '/chat/completions'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${settings.apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: RIBBON_FILTER_SYSTEM },
-          { role: 'user', content: userContent },
-        ],
-        temperature: 0.1,
-        max_tokens: 64,
-      }),
-      signal: withTimeout(signal, 8000),
-    })
-    if (!res.ok) return items
-
-    const data = (await res.json()) as ChatCompletionResponse
-    const raw = (data.choices?.[0]?.message?.content ?? '').trim().toUpperCase()
-    if (raw.includes('ALL')) return items
-
-    const indices = new Set<number>()
-    raw
-      .replace(/\s/g, '')
-      .split(',')
-      .forEach((s) => {
-        const n = parseInt(s, 10)
-        if (!Number.isNaN(n) && n >= 0 && n < items.length) indices.add(n)
+  for (const model of getQuickModelCandidates(settings)) {
+    try {
+      const res = await fetch(apiUrl(settings.baseUrl, '/chat/completions'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${settings.apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: RIBBON_FILTER_SYSTEM },
+            { role: 'user', content: userContent },
+          ],
+          temperature: 0.1,
+          max_tokens: 64,
+        }),
+        signal: withTimeout(signal, 8000),
       })
-    if (indices.size === 0) return items
 
-    return items.filter((_, i) => indices.has(i))
-  } catch {
-    return items
+      if (res.status === 400 && model !== settings.model.trim()) {
+        rejectedQuickModels.add(quickModelKey(settings.baseUrl, model))
+        continue
+      }
+      if (!res.ok) return items
+
+      const data = (await res.json()) as ChatCompletionResponse
+      const raw = (data.choices?.[0]?.message?.content ?? '').trim().toUpperCase()
+      if (raw.includes('ALL')) return items
+
+      const indices = new Set<number>()
+      raw
+        .replace(/\s/g, '')
+        .split(',')
+        .forEach((s) => {
+          const n = parseInt(s, 10)
+          if (!Number.isNaN(n) && n >= 0 && n < items.length) indices.add(n)
+        })
+      if (indices.size === 0) return items
+
+      return items.filter((_, i) => indices.has(i))
+    } catch {
+      if (model === settings.model.trim()) return items
+    }
   }
+
+  return items
+}
+
+export async function reviewParagraphForCliche(
+  paragraph: string,
+  matchedPhrases: string[],
+  settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model' | 'ribbonFilterModel'>,
+  signal?: AbortSignal,
+): Promise<ClicheReviewResult> {
+  const normalizedParagraph = paragraph.trim().slice(0, 220)
+  const normalizedPhrases = matchedPhrases
+    .map((phrase) => phrase.trim())
+    .filter(Boolean)
+    .slice(0, 6)
+
+  const fallback: ClicheReviewResult = {
+    isCliche: normalizedPhrases.length > 0,
+    confidence: normalizedPhrases.length >= 2 ? 'medium' : 'low',
+    reasonTag: 'stock_phrase',
+    message: normalizedPhrases.length > 0 ? '这句带有比较常见的套话感。' : '这句暂时未见明显套话。',
+    matchedPhrases: normalizedPhrases,
+  }
+
+  if (!normalizedParagraph) return { ...fallback, isCliche: false }
+  if (!settings.apiKey) return fallback
+
+  const userContent = [
+    `段落：${normalizedParagraph}`,
+    normalizedPhrases.length > 0 ? `词表命中：${normalizedPhrases.join(' / ')}` : '词表命中：无',
+    '请只判断这句是否属于常见套话，不要提供修改建议。',
+  ].join('\n')
+
+  for (const model of getQuickModelCandidates(settings)) {
+    try {
+      const res = await fetch(apiUrl(settings.baseUrl, '/chat/completions'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${settings.apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: CLICHE_REVIEW_SYSTEM },
+            { role: 'user', content: userContent },
+          ],
+          temperature: 0.1,
+          max_tokens: 96,
+        }),
+        signal: withTimeout(signal, 5000),
+      })
+
+      if (res.status === 400 && model !== settings.model.trim()) {
+        rejectedQuickModels.add(quickModelKey(settings.baseUrl, model))
+        continue
+      }
+      if (!res.ok) return fallback
+
+      const data = (await res.json()) as ChatCompletionResponse
+      const raw = (data.choices?.[0]?.message?.content ?? '').trim()
+      const parsed = JSON.parse(extractJsonBlock(raw)) as Partial<ClicheReviewResult>
+
+      return {
+        isCliche: Boolean(parsed.isCliche),
+        confidence:
+          parsed.confidence === 'high' ||
+          parsed.confidence === 'medium' ||
+          parsed.confidence === 'low'
+            ? parsed.confidence
+            : fallback.confidence,
+        reasonTag:
+          parsed.reasonTag === 'stock_phrase' ||
+          parsed.reasonTag === 'emotion' ||
+          parsed.reasonTag === 'imagery' ||
+          parsed.reasonTag === 'transition' ||
+          parsed.reasonTag === 'generic'
+            ? parsed.reasonTag
+            : fallback.reasonTag,
+        message:
+          typeof parsed.message === 'string' && parsed.message.trim()
+            ? parsed.message.trim().slice(0, 30)
+            : fallback.message,
+        matchedPhrases:
+          Array.isArray(parsed.matchedPhrases) && parsed.matchedPhrases.length > 0
+            ? parsed.matchedPhrases
+                .filter((item): item is string => typeof item === 'string')
+                .slice(0, 6)
+            : fallback.matchedPhrases,
+      }
+    } catch {
+      if (model === settings.model.trim()) return fallback
+    }
+  }
+
+  return fallback
 }
 
 /**
@@ -1210,10 +1372,16 @@ export async function generateEchoesForModule(
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model' | 'ribbonFilterModel'>,
   module: { type: RibbonModuleType; id: string; prompt?: string; model?: string; label?: string },
   blockId?: string,
-  options?: { allowRagFallback?: boolean; skipRagPreprocess?: boolean; signal?: AbortSignal; timeoutMs?: number }
+  options?: {
+    allowRagFallback?: boolean
+    skipRagPreprocess?: boolean
+    signal?: AbortSignal
+    timeoutMs?: number
+  },
 ): Promise<ModuleGenerationResult> {
   // Support: ai:*, custom, quick types
-  const isSupported = module.type.startsWith('ai:') || module.type === 'custom' || module.type === 'quick'
+  const isSupported =
+    module.type.startsWith('ai:') || module.type === 'custom' || module.type === 'quick'
   if (!settings.apiKey || !isSupported) {
     return { items: [], usedRag: false, error: '模块不支持或未配置API' }
   }
@@ -1267,17 +1435,16 @@ export async function generateEchoesForModule(
   } else if (
     ragResults.length > 0 &&
     module.type === 'custom' &&
-    (
-      customOptions?.useRag ||
-      (options?.allowRagFallback && customOptions?.ragFallback)
-    )
+    (customOptions?.useRag || (options?.allowRagFallback && customOptions?.ragFallback))
   ) {
     // Custom modules opt into RAG explicitly; built-in AI modules default to user-context-only prompts.
     usedRag = true
     const alreadySummarized = ragResults.every((r) => (r.shortSummary ?? '').trim().length > 0)
     if (!options?.skipRagPreprocess) {
       ragForPrompt = await correctRagResultsForContext(ragResults, settings, options?.signal)
-      ragForPrompt = alreadySummarized ? ragForPrompt : await summarizeRagChunks(ragForPrompt, settings, options?.signal)
+      ragForPrompt = alreadySummarized
+        ? ragForPrompt
+        : await summarizeRagChunks(ragForPrompt, settings, options?.signal)
     } else {
       ragForPrompt = ragResults
     }
@@ -1295,7 +1462,9 @@ export async function generateEchoesForModule(
   const modelToUse = module.model?.trim() || settings.model
   const maxTokens =
     module.type === 'custom'
-      ? (paragraphOutput ? 240 : 320)
+      ? paragraphOutput
+        ? 240
+        : 320
       : module.type === 'quick'
         ? 192
         : module.type === 'ai:quote'
@@ -1304,21 +1473,6 @@ export async function generateEchoesForModule(
 
   const sourceLabel = getModuleDisplayLabel(module.type, module.id, module.label)
   const fetchStart = Date.now()
-
-  debugIngest('H1', 'client-ai.service.ts:generateEchoesForModule:start', 'chat.completions start', {
-    moduleId: module.id,
-    sourceLabel,
-    type: module.type,
-    baseUrl: settings.baseUrl,
-    url: apiUrl(settings.baseUrl, '/chat/completions'),
-    model: modelToUse,
-    systemPromptLen: systemPrompt.length,
-    userContentLen: userContent.length,
-    maxTokens,
-    hasRag: ragResults.length > 0,
-    ragCount: ragResults.length,
-    signalProvided: !!options?.signal,
-  })
 
   let res: Response
   try {
@@ -1338,18 +1492,6 @@ export async function generateEchoesForModule(
     })
   } catch (err) {
     const elapsed = Date.now() - fetchStart
-    debugIngest('H1', 'client-ai.service.ts:generateEchoesForModule:catch', 'chat.completions error', {
-      moduleId: module.id,
-      sourceLabel,
-      type: module.type,
-      baseUrl: settings.baseUrl,
-      url: apiUrl(settings.baseUrl, '/chat/completions'),
-      model: modelToUse,
-      elapsedMs: elapsed,
-      errName: (err as Error)?.name,
-      errMsg: (err as Error)?.message,
-      isDOMException: err instanceof DOMException,
-    })
     devLog.push('ai', `generateEchoesForModule [${sourceLabel}] fetch error`, {
       moduleId: module.id,
       errName: (err as Error)?.name,
@@ -1392,16 +1534,6 @@ export async function generateEchoesForModule(
   const choice = data.choices?.[0]
   const text = choice?.message?.content ?? ''
   const finishReason = choice?.finish_reason
-  debugIngest('H1', 'client-ai.service.ts:generateEchoesForModule:ok', 'chat.completions ok', {
-    moduleId: module.id,
-    sourceLabel,
-    type: module.type,
-    model: modelToUse,
-    status: res.status,
-    elapsedMs: Date.now() - fetchStart,
-    textLen: text.length,
-    finishReason: finishReason ?? '(unknown)',
-  })
 
   if (text.length === 0) {
     devLog.push('ai', `generateEchoesForModule [${sourceLabel}] empty API response`, {
@@ -1446,7 +1578,13 @@ export async function generateBatchEchoesForModules(
   context: string,
   ragForAi: EchoItem[],
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model' | 'ribbonFilterModel'>,
-  modules: Array<{ type: RibbonModuleType; id: string; prompt?: string; model?: string; label?: string }>,
+  modules: Array<{
+    type: RibbonModuleType
+    id: string
+    prompt?: string
+    model?: string
+    label?: string
+  }>,
   blockId?: string,
   options?: { signal?: AbortSignal; timeoutMs?: number },
 ): Promise<{ byModuleId: Record<string, EchoItem[]> }> {
@@ -1555,8 +1693,13 @@ Rules:
   for (let i = 0; i < allowedModules.length; i++) {
     const m = allowedModules[i]
     const arr = (results as Record<string, unknown>)[m.id]
-    const lines = Array.isArray(arr) ? arr.filter((x) => typeof x === 'string').map((x) => (x as string).trim()) : []
-    const rawText = lines.filter((x) => x.length > 0).slice(0, 5).join('\n')
+    const lines = Array.isArray(arr)
+      ? arr.filter((x) => typeof x === 'string').map((x) => (x as string).trim())
+      : []
+    const rawText = lines
+      .filter((x) => x.length > 0)
+      .slice(0, 5)
+      .join('\n')
 
     const sourceLabel = getModuleDisplayLabel(m.type, m.id, m.label)
     const normalizedText = normalizeModuleOutputText(rawText, m)
@@ -1568,9 +1711,10 @@ Rules:
       normalizedEmpty: normalizedText.trim().length === 0,
     })
 
-    byModuleId[m.id] = normalizedText.trim().length === 0
-      ? []
-      : buildModuleEchoItems(m, sourceLabel, normalizedText, blockId)
+    byModuleId[m.id] =
+      normalizedText.trim().length === 0
+        ? []
+        : buildModuleEchoItems(m, sourceLabel, normalizedText, blockId)
   }
 
   return { byModuleId }
@@ -1603,9 +1747,10 @@ function normalizeWritingSuggestions(value: unknown): WritingSuggestion[] {
       const title = typeof record.title === 'string' ? record.title.trim() : ''
       const detail = typeof record.detail === 'string' ? record.detail.trim() : ''
       const tag = typeof record.tag === 'string' ? record.tag.trim() : undefined
-      const severity = record.severity === 'gentle' || record.severity === 'watch' || record.severity === 'strong'
-        ? record.severity
-        : undefined
+      const severity =
+        record.severity === 'gentle' || record.severity === 'watch' || record.severity === 'strong'
+          ? record.severity
+          : undefined
       if (!title && !detail) return null
       return {
         id: `suggestion-${index}-${title || detail}`.slice(0, 64),
@@ -1653,8 +1798,17 @@ function localRevisionRadar(context: string): WritingSuggestion[] {
     })
   }
 
-  const abstractWordCount = ['感觉', '情绪', '命运', '孤独', '温柔', '痛苦', '悲伤', '美好', '复杂']
-    .reduce((sum, word) => sum + (text.match(new RegExp(word, 'g'))?.length ?? 0), 0)
+  const abstractWordCount = [
+    '感觉',
+    '情绪',
+    '命运',
+    '孤独',
+    '温柔',
+    '痛苦',
+    '悲伤',
+    '美好',
+    '复杂',
+  ].reduce((sum, word) => sum + (text.match(new RegExp(word, 'g'))?.length ?? 0), 0)
   if (abstractWordCount >= 2) {
     suggestions.push({
       id: 'local-abstract',
@@ -1684,7 +1838,12 @@ async function requestWritingAssist(
   systemPrompt: string,
   userPrompt: string,
   settings: Pick<Settings, 'apiKey' | 'baseUrl' | 'model'>,
-  options?: { signal?: AbortSignal; timeoutMs?: number; referenceLabel?: string; fallbackItems?: WritingSuggestion[] },
+  options?: {
+    signal?: AbortSignal
+    timeoutMs?: number
+    referenceLabel?: string
+    fallbackItems?: WritingSuggestion[]
+  },
 ): Promise<WritingAssistResult> {
   const fallbackItems = options?.fallbackItems ?? []
   if (!settings.apiKey) {
@@ -1842,7 +2001,9 @@ export async function generatePlotProgression(
       `当前场景：\n${trimmed}`,
       referenceText ? `可参考的互文材料：\n${referenceText}` : '',
       '请给出能直接进入修订或场景卡的短反馈，不要重复当前段落。',
-    ].filter(Boolean).join('\n\n'),
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
     settings,
     { ...options, referenceLabel: options?.referenceLabel },
   )
@@ -1887,7 +2048,9 @@ export async function generateCharacterConsistency(
       `当前文本：\n${trimmed}`,
       referenceText ? `人物或互文参考：\n${referenceText}` : '',
       '请围绕当前场景给我 1-3 条短提醒，不要给成稿。',
-    ].filter(Boolean).join('\n\n'),
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
     settings,
     { ...options, referenceLabel: options?.referenceLabel },
   )
@@ -1966,7 +2129,9 @@ export async function generateSceneMemoryMap(
       `当前场景正文：\n${trimmed}`,
       referenceText ? `互文或参考：\n${referenceText}` : '',
       '请提炼出适合进入作者记忆图谱的节点。',
-    ].filter(Boolean).join('\n\n'),
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
     settings,
     { ...options, referenceLabel: options?.referenceLabel },
   )

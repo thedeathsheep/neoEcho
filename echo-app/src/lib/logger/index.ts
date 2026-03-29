@@ -40,8 +40,7 @@ function createLogger(module: string) {
     if (!shouldLog(level)) return
     const formatted = formatMessage(level, module, message, data)
     if (level === 'error') console.error(formatted)
-    else if (level === 'warn') console.warn(formatted)
-    else console.log(formatted)
+    else console.warn(formatted)
   }
 
   return {

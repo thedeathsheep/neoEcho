@@ -38,8 +38,11 @@ const DB_TABLES = {
 
 /**
  * Database abstraction layer.
- * Currently uses an in-memory Map store for development.
- * Will be replaced with better-sqlite3 or sql.js when persistence is needed.
+ * This file is a reserved abstraction and is not the app's active persistence path today.
+ * Current user-facing persistence lives in browser storage:
+ * - documents/settings: localStorage
+ * - knowledge chunks/embeddings: IndexedDB
+ * The in-memory Map here only exists for future data-layer integration work.
  */
 class LocalDB {
   private store = new Map<string, Map<string, Record<string, unknown>>>()

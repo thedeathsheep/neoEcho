@@ -19,7 +19,7 @@
 }
 
 /* Light theme explicit (optional, for symmetry) */
-[data-theme="light"] {
+[data-theme='light'] {
   --color-paper: #fdfcfb;
   --color-paper-warm: #f5f2ef;
   --color-ink: #2c2c2c;
@@ -33,7 +33,7 @@
 }
 
 /* Dark theme: scientific contrast, non-pure-black background */
-[data-theme="dark"] {
+[data-theme='dark'] {
   --color-paper: #161618;
   --color-paper-warm: #1c1c1e;
   --color-ink: #e5e5e7;
@@ -47,13 +47,13 @@
 }
 
 /* Font size */
-[data-font-size="small"] {
+[data-font-size='small'] {
   --font-size-base: 14px;
 }
-[data-font-size="medium"] {
+[data-font-size='medium'] {
   --font-size-base: 16px;
 }
-[data-font-size="large"] {
+[data-font-size='large'] {
   --font-size-base: 18px;
 }
 
@@ -74,7 +74,7 @@ body {
   background-color: #e5e5e5;
 }
 
-[data-theme="dark"] ::selection {
+[data-theme='dark'] ::selection {
   background-color: #3a3a3c;
 }
 
@@ -105,13 +105,14 @@ body {
   background-clip: padding-box;
 }
 
-.no-scrollbar::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
 .no-scrollbar {
-  -ms-overflow-style: auto;
-  scrollbar-width: thin;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 /* Thin subtle scrollbar for ribbon sidebar */
@@ -135,6 +136,81 @@ body {
 .ProseMirror {
   outline: none;
   min-height: 50vh;
+}
+
+.ProseMirror h1,
+.ProseMirror h2,
+.ProseMirror h3,
+.ProseMirror h4,
+.ProseMirror h5,
+.ProseMirror h6 {
+  font-family: var(--font-serif);
+  color: var(--color-ink);
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 1.1em 0 0.5em;
+}
+
+.ProseMirror h1 {
+  font-size: 1.7rem;
+}
+
+.ProseMirror h2 {
+  font-size: 1.42rem;
+}
+
+.ProseMirror h3 {
+  font-size: 1.2rem;
+}
+
+.ProseMirror p {
+  margin: 0;
+}
+
+.ProseMirror > * + * {
+  margin-top: 0.9em;
+}
+
+.ProseMirror ul,
+.ProseMirror ol {
+  margin: 0.9em 0;
+  padding-left: 1.5em;
+}
+
+.ProseMirror ul {
+  list-style: disc;
+}
+
+.ProseMirror ol {
+  list-style: decimal;
+}
+
+.ProseMirror li {
+  margin: 0.25em 0;
+}
+
+.ProseMirror li::marker {
+  color: color-mix(in srgb, var(--color-ink) 82%, transparent);
+}
+
+.ProseMirror blockquote {
+  margin: 1em 0;
+  padding-left: 1em;
+  border-left: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+  color: color-mix(in srgb, var(--color-ink-light) 88%, transparent);
+}
+
+.ProseMirror a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.ProseMirror code {
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, var(--color-ink) 7%, transparent);
+  padding: 0.08em 0.35em;
+  font-size: 0.92em;
 }
 
 .ProseMirror p.is-editor-empty:first-child::before {

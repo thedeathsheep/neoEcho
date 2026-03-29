@@ -1,131 +1,40 @@
 'use client'
 
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useState,
-} from 'react'
+import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 
 import { customPromptService } from '@/services/custom-prompt.service'
-import type { RibbonModuleConfig, RibbonSettings } from '@/types'
 
-export interface Settings {
-  apiKey: string
-  model: string
-  baseUrl: string
-  theme: 'light' | 'dark' | 'system'
-  fontSize: 'small' | 'medium' | 'large'
-  activeKnowledgeBaseId: string | null
-  /**
-   * Ribbon run profile (single-select).
-   * - balanced: normal behavior (user toggles apply)
-   * - fast: latency-first (forces some retrieval enhancements off)
-   * - reliable: debug profile (forces longer timeouts & avoids skipping)
-   */
-  ribbonRunProfile: 'balanced' | 'fast' | 'reliable'
-  /** Use AI to expand query for RAG (e.g. "春天" -> "春天 花开 温暖 春风") for better semantic recall */
-  semanticExpansion: boolean
-  /** Use API for embeddings (better quality, especially for Chinese) */
-  useEmbeddingApi: boolean
-  embeddingBaseUrl: string
-  embeddingApiKey: string
-  embeddingModel: string
-  /** Use small/quick model to filter low-value snippets from ribbon after retrieval */
-  ribbonAiFilter: boolean
-  /** Model used for ribbon filter only; empty = use main model (slower). Use a small/fast model here for speed. */
-  ribbonFilterModel: string
-  /** Seconds of typing pause before ribbon refreshes (1–10). */
-  ribbonPauseSeconds: number
-  /** Ribbon content modules and slot count (5–8). */
-  ribbonSettings: RibbonSettings
-  /** Enable RAG rerank (experimental): use multi-view candidates + AI rerank. */
-  ragRerankEnabled: boolean
-  /** Low latency mode: skip query expansion and RAG rerank. */
-  lowLatencyMode: boolean
-  /** Sensory zoom: expand selected sensory phrase with micro details from RAG + AI. */
-  sensoryZoomEnabled: boolean
-  /** Style entropy: detect clichés in current paragraph and show alternatives from RAG. */
-  clicheDetectionEnabled: boolean
-  /** Reliable mode: prioritize getting any output; use longer timeouts and show loading placeholders. */
-  reliableRibbonMode: boolean
+import {
+  BUILTIN_RIBBON_MODULES,
+  DEFAULT_SETTINGS,
+  getDefaultRibbonSettings,
+  MAX_ENABLED_AMBIENT_MODULES,
+  normalizeStoredSettings,
+  RECOMMENDED_ENABLED_AMBIENT_MODULES,
+  sanitizeRibbonModulesWithAmbientPrompts,
+  type SettingsShape,
+} from './settings-core'
+
+export type Settings = SettingsShape
+
+export {
+  BUILTIN_RIBBON_MODULES,
+  DEFAULT_SETTINGS,
+  getDefaultRibbonSettings,
+  MAX_ENABLED_AMBIENT_MODULES,
+  normalizeStoredSettings,
+  RECOMMENDED_ENABLED_AMBIENT_MODULES,
 }
-
-export const BUILTIN_RIBBON_MODULES: Omit<RibbonModuleConfig, 'enabled' | 'pinned'>[] = [
-  { id: 'rag', type: 'rag', label: '共鸣库检索' },
-  { id: 'ai:imagery', type: 'ai:imagery', label: 'AI 意象' },
-  { id: 'ai:polish', type: 'ai:polish', label: 'AI 润色' },
-  { id: 'ai:narrative', type: 'ai:narrative', label: 'AI 叙事' },
-  { id: 'ai:quote', type: 'ai:quote', label: 'AI 引用' },
-]
-
-export const RECOMMENDED_ENABLED_AMBIENT_MODULES = 3
-export const MAX_ENABLED_AMBIENT_MODULES = 4
 
 export function getAmbientCustomPrompts() {
   return customPromptService.getAll().filter((prompt) => (prompt.mode ?? 'ambient') === 'ambient')
 }
 
-export function sanitizeRibbonModules(modules: RibbonModuleConfig[]): RibbonModuleConfig[] {
-  const ambientCustomIds = new Set(getAmbientCustomPrompts().map((prompt) => prompt.id))
-  const filtered = modules.filter(
-    (module) => module.id !== 'quick:helper' && (module.type !== 'custom' || ambientCustomIds.has(module.id)),
+export function sanitizeRibbonModules(modules: import('@/types').RibbonModuleConfig[]) {
+  return sanitizeRibbonModulesWithAmbientPrompts(
+    modules,
+    new Set(getAmbientCustomPrompts().map((prompt) => prompt.id)),
   )
-  const enabledAmbientModules = filtered
-    .map((module, index) => ({ module, index }))
-    .filter(({ module }) => module.type !== 'rag' && module.enabled)
-    .sort((left, right) => {
-      if (left.module.pinned !== right.module.pinned) return left.module.pinned ? -1 : 1
-      return left.index - right.index
-    })
-  const keepEnabledIds = new Set(
-    enabledAmbientModules.slice(0, MAX_ENABLED_AMBIENT_MODULES).map(({ module }) => module.id),
-  )
-
-  return filtered.map((module) => {
-    if (module.type === 'rag') return module
-    if (module.enabled && !keepEnabledIds.has(module.id)) {
-      return { ...module, enabled: false, pinned: false }
-    }
-    return module
-  })
-}
-
-function getDefaultRibbonSettings(): RibbonSettings {
-  return {
-    slotCount: 5,
-    allocationMode: 'balanced',
-    modules: BUILTIN_RIBBON_MODULES.map((m) => ({
-      ...m,
-      enabled: m.id === 'rag' || m.id === 'ai:imagery',
-      pinned: false,
-    })),
-  }
-}
-
-const DEFAULT_SETTINGS: Settings = {
-  apiKey: '',
-  model: 'deepseek-chat',
-  baseUrl: 'https://api.deepseek.com',
-  theme: 'light',
-  fontSize: 'medium',
-  activeKnowledgeBaseId: null,
-  ribbonRunProfile: 'balanced',
-  semanticExpansion: false,
-  useEmbeddingApi: false,
-  embeddingBaseUrl: '',
-  embeddingApiKey: '',
-  embeddingModel: 'BAAI/bge-m3',
-  ribbonAiFilter: false,
-  ribbonFilterModel: '',
-  ribbonPauseSeconds: 2,
-  ribbonSettings: getDefaultRibbonSettings(),
-  ragRerankEnabled: false,
-  lowLatencyMode: false,
-  sensoryZoomEnabled: true,
-  clicheDetectionEnabled: false,
-  reliableRibbonMode: false,
 }
 
 const STORAGE_KEY = 'echo-settings'
@@ -142,70 +51,11 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const [loaded, setLoaded] = useState(false)
 
-  // Load settings from localStorage on mount
   useEffect(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY)
       if (saved) {
-        const parsed = JSON.parse(saved)
-        const merged = {
-          ...DEFAULT_SETTINGS,
-          ...parsed,
-        } as Settings & {
-          ribbonRunProfile?: Settings['ribbonRunProfile']
-          lowLatencyMode?: boolean
-          reliableRibbonMode?: boolean
-        }
-        // Backward-compatible migration: derive ribbonRunProfile if missing.
-        if (!merged.ribbonRunProfile) {
-          if (merged.reliableRibbonMode) merged.ribbonRunProfile = 'reliable'
-          else if (merged.lowLatencyMode) merged.ribbonRunProfile = 'fast'
-          else merged.ribbonRunProfile = 'balanced'
-        }
-        // Keep legacy flags consistent for runtime reads.
-        merged.lowLatencyMode = merged.ribbonRunProfile === 'fast'
-        merged.reliableRibbonMode = merged.ribbonRunProfile === 'reliable'
-        if (!merged.ribbonSettings?.slotCount || !Array.isArray(merged.ribbonSettings?.modules)) {
-          merged.ribbonSettings = getDefaultRibbonSettings()
-        } else {
-          const saved = (merged.ribbonSettings.modules as RibbonModuleConfig[]).filter(
-            (module) => module.id !== 'quick:helper',
-          )
-          const byId = new Map(saved.map((m) => [m.id, m]))
-          const builtinAiIds = BUILTIN_RIBBON_MODULES.filter((b) => (b.type || b.id || '').startsWith('ai:')).map((b) => b.id)
-          const allAiDisabled = builtinAiIds.length > 0 && builtinAiIds.every((id) => byId.get(id)?.enabled === false)
-          const ambientCustomIds = new Set(getAmbientCustomPrompts().map((prompt) => prompt.id))
-          const savedCustom = saved.filter((m) => m.type === 'custom' && ambientCustomIds.has(m.id))
-          const savedCustomIds = new Set(savedCustom.map((m) => m.id))
-          // Merge custom prompts from customPromptService that are not yet in ribbon (e.g. 百科)
-          const customPrompts = getAmbientCustomPrompts()
-          const newCustom = customPrompts
-            .filter((p) => !savedCustomIds.has(p.id))
-            .map((p) => ({
-              id: p.id,
-              type: 'custom' as const,
-              label: p.name,
-              enabled: false,
-              pinned: false,
-            }))
-          const normalized = [
-            ...BUILTIN_RIBBON_MODULES.map((b) => {
-              let enabled = byId.get(b.id)?.enabled ?? (b.id === 'rag' || b.id === 'ai:imagery')
-              if (allAiDisabled && (b.type || b.id || '').startsWith('ai:') && b.id === 'ai:imagery') {
-                enabled = true
-              }
-              return { ...b, enabled, pinned: byId.get(b.id)?.pinned ?? false }
-            }),
-            ...savedCustom,
-            ...newCustom,
-          ]
-          merged.ribbonSettings = {
-            ...merged.ribbonSettings,
-            modules: sanitizeRibbonModules(normalized),
-            allocationMode: merged.ribbonSettings.allocationMode ?? 'balanced',
-          }
-        }
-        setSettings(merged)
+        setSettings(normalizeStoredSettings(JSON.parse(saved), getAmbientCustomPrompts(), DEFAULT_SETTINGS))
       }
     } catch (e) {
       console.error('Failed to load settings', e)
@@ -214,7 +64,6 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
-  // Save settings to localStorage whenever they change
   useEffect(() => {
     if (!loaded) return
     try {
@@ -227,21 +76,19 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const theme = settings.theme
   const fontSize = settings.fontSize
 
-  // Apply theme and fontSize to DOM (after load so we don't overwrite inline script before hydrate)
   useEffect(() => {
     if (!loaded) return
     const resolvedTheme =
       theme === 'system'
-        ? (typeof window !== 'undefined' &&
-           window.matchMedia?.('(prefers-color-scheme: dark)')?.matches
+        ? typeof window !== 'undefined' &&
+          window.matchMedia?.('(prefers-color-scheme: dark)')?.matches
           ? 'dark'
-          : 'light')
+          : 'light'
         : theme
     document.documentElement.setAttribute('data-theme', resolvedTheme)
     document.documentElement.setAttribute('data-font-size', fontSize)
   }, [fontSize, loaded, theme])
 
-  // Subscribe to system preference when theme is 'system'
   useEffect(() => {
     if (!loaded || theme !== 'system') return
     const mq = window.matchMedia?.('(prefers-color-scheme: dark)')
@@ -262,7 +109,10 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
           ...prev.ribbonSettings,
           ...updates.ribbonSettings,
           modules: sanitizeRibbonModules(updates.ribbonSettings.modules),
-          allocationMode: updates.ribbonSettings.allocationMode ?? prev.ribbonSettings.allocationMode ?? 'balanced',
+          allocationMode:
+            updates.ribbonSettings.allocationMode ??
+            prev.ribbonSettings.allocationMode ??
+            'balanced',
         }
       }
       return next
@@ -274,9 +124,7 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <SettingsContext.Provider
-      value={{ settings, updateSettings, resetSettings }}
-    >
+    <SettingsContext.Provider value={{ settings, updateSettings, resetSettings }}>
       {children}
     </SettingsContext.Provider>
   )
