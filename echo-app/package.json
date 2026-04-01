@@ -7,7 +7,7 @@
     "dev:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/next-dev-for-tauri.ps1",
     "build": "next build",
     "start": "next start",
-    "test": "node --test --experimental-strip-types src/lib/*.test.ts",
+    "test": "node --test --experimental-strip-types src/lib/*.test.ts src/services/*.test.ts",
     "lint": "eslint . --fix",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\"",
